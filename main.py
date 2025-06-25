@@ -47,67 +47,39 @@ import sys
 import select
 import tty
 import termios
-# [trungtruong]
 
 
 def hypernetwork():
-    # Test different target network architectures
-    target_architectures = [
-        [3, 5, 1],
-    ]
+    target_arch = [5, 20, 1]
+    hn_config = [768, 384, 192]
 
-    hypernetwork_configs = [
-        [128, 64, 32],
-    ]
-
-    # results = {}
-    # results_file = f"architecture_comparison_{time.strftime('%Y%m%d_%H%M%S')}.txt"
-
-    for target_arch in target_architectures:
-        for hn_config in hypernetwork_configs:
-            print(f"\n\n{'='*60}")
-            print(f"Testing target: {target_arch}, hypernetwork: {hn_config}")
-            print(f"{'='*60}\n")
-
-            max_ratio = run_hypernetwork_with_architecture(
-                target_arch, hn_config, time_limit_minutes=900
-            )
-
-            # arch_key = f"target_{'-'.join(map(str, target_arch))}_hn_{'-'.join(map(str, hn_config))}"
-            # results[arch_key] = max_ratio
-
-            # with open(results_file, "a") as f:
-            #     f.write(f"{arch_key}: {max_ratio}\n")
-
-            # print(f"Result for {arch_key}: {max_ratio}")
+    run_hypernetwork_with_architecture(target_arch, hn_config)
 
 
-def run_hypernetwork_with_architecture(target_arch, hn_config, time_limit_minutes=10):
+def run_hypernetwork_with_architecture(target_arch, hn_config):
+    
+    # Initialize the target network and hypernetwork
     target_network = FunctionalR(target_arch).to(device)
-    print(f"Target network architecture: {target_arch}")
-
-    # Print architecture info
-    total_params = 0
-    for layer in target_network.get_parameter_shapes():
-        weight_shape, bias_shape = layer
-        layer_params = np.prod(weight_shape) + np.prod(bias_shape)
-        total_params += layer_params
-    print(f"Total target parameters: {total_params}")
 
     hypernetwork = Hypernetwork(
         hidden_layers=hn_config,
         activation="relu",
         target_network=target_network,
     ).to(device)
-    hn_params = sum(p.numel() for p in hypernetwork.parameters() if p.requires_grad)
-    print(f"Hypernetwork parameters: {hn_params}")
     
-    print(f"Parameter ratio (HN/Target): {hn_params/total_params:.2f}")
-
+    target_params = sum(p.numel() for p in target_network.parameters() if p.requires_grad)
+    hn_params = sum(p.numel() for p in hypernetwork.parameters() if p.requires_grad)
+    print(f"Target network parameters: {target_params}")
+    print(f"Hypernetwork parameters: {hn_params}")
+    print(f"Parameter ratio (HN/Target): {hn_params / target_params:.4f}")
+    #############################
+    
     optimizer = optim.Adam(hypernetwork.parameters(), lr=0.001)
-
+    
     worst_case_profiles = []
-    # total_error_history = []
+    total_error_history = []
+    
+    # Get alpha delta
     if env_alpha_delta == 0:
         achievable_alpha_delta = 0
     else:
@@ -116,61 +88,38 @@ def run_hypernetwork_with_architecture(target_arch, hn_config, time_limit_minute
         else:
             achievable_alpha_delta = target_network.achievable_alpha_delta
             print(f"restored achievable_alpha_delta to {achievable_alpha_delta}")
-            
-    print(f"achievable_alpha_delta={achievable_alpha_delta}")
     alpha_delta = max(achievable_alpha_delta - 0.001, 0)
+    #############################
+    
     train_using_worst_case = env_train_using_worst_case == 1
     train_using_free_samples = env_train_using_free_samples == 1
     print(
         f"hypernetwork {finger_print} alpha_delta={alpha_delta}, train_using_worst_case={train_using_worst_case}, train_using_free_samples={train_using_free_samples}"
     )
-    # train_count = 0
-    # train_count_limit = 10
-    # worst_case_done = 0
-
-    # Initialize keyboard listener
+    
     keyboard_listener = KeyboardListener()
     keyboard_listener.start_listening()
-
+    
     try:
-        # Track the maximum allocative ratio achieved
         max_allocative_ratio = 0.0
-        
-        # Track the time 
         start_time = time.time()
-        time_limit_seconds = time_limit_minutes * 60        
         
-        # Track allocative ratios for plotting
         allocative_ratios = []
         iterations = []
         
-        # Track time since max ratio improvement
         time_of_last_max_improvement = start_time
-
+        
+        
         for iter_index in count(start=1):
-            # Start timing the entire iteration
             iteration_start_time = time.time()
-
-            # Check stopping conditions
-            # elapsed_time_check = time.time() - start_time
-            # if elapsed_time_check >= time_limit_seconds:
-            #     print(
-            #         f"Time limit of {time_limit_minutes} minutes reached. Stopping training."
-            #     )
-            #     break
-
+            
             if keyboard_listener.stop_training:
                 print("Training stopped by user input.")
                 break
-
-            # if worst_case_done == story3_worst_case_done_limit:
-            #     break
-
-            profiles = victor_profiles + worst_case_profiles[-256:]  # noqa: E203
-
-            # print(f"Training with {len(profiles) + 256} profiles")
-
-            # Start timing the training
+            
+            profiles = victor_profiles + worst_case_profiles[-32:]
+            
+            # Train the hypernetwork
             training_start_time = time.time()
             avg_loss = hypernetwork_train(
                 hypernetwork,
@@ -179,27 +128,12 @@ def run_hypernetwork_with_architecture(target_arch, hn_config, time_limit_minute
                 profiles,
                 alpha_delta=alpha_delta,
                 device=device,
-                # worst_case_profiles=(
-                #     worst_case_profiles[:-16] if train_using_worst_case else None
-                # ),
-                # worst_case_profiles=(
-                #     worst_case_profiles if train_using_worst_case else None
-                # ),
-                epochs=300,
+                epochs=500,
             )
             training_duration = time.time() - training_start_time
-            # train_count += 1
-            # if train_using_free_samples:
-            #     print(
-            #         f"iter={iter_index} avg_loss={avg_loss:.20f} loss_schedule={loss_schedule(train_count):.20f} with train_count {train_count}"
-            #     )
-            #     if (
-            #         avg_loss > loss_schedule(train_count)
-            #         and train_count < train_count_limit
-            #     ):
-            #         continue
-            #     else:
-            #         train_count = 0
+            #############################
+            
+            # Running worst case analysis
             worst_case_start_time = time.time()
             (
                 wcp_left,
@@ -209,15 +143,36 @@ def run_hypernetwork_with_architecture(target_arch, hn_config, time_limit_minute
                 total_error,
             ) = target_network.worst_case_analysis(alpha_delta=alpha_delta)
             worst_case_duration = time.time() - worst_case_start_time
-            # worst_case_done += 1
+            #############################
+            
+            # Add worst case profiles
             worst_case_profiles = add_two_profiles(
                 wcp_left, wcp_right, worst_case_profiles
-            )            
+            )
+            iteration_duration = time.time() - iteration_start_time   
+            ############################# 
             
-            # Calculate total iteration time
-            iteration_duration = time.time() - iteration_start_time
+            # Alpha delta adjustment
+            if total_error < min(total_error_history, default=(1000, 0))[0]:
+                target_network.achievable_alpha_delta = achievable_alpha_delta
+                fn = f"saved/{finger_print}-{iter_index:05}-{total_error:.20f}.saved"
+                # Ensure the directory exists [trungtruong]
+                os.makedirs(os.path.dirname(fn), exist_ok=True)
+                torch.save(target_network, fn)
+            total_error_history.append((total_error, iter_index))
+            achievable_alpha_delta = min(achievable_alpha_delta, total_error)
 
-            # Calculate elapsed time from start (at end of iteration)
+            if total_error - alpha_delta < 0.001:
+                new_alpha_delta = max(alpha_delta / 2, alpha_delta - 0.01)
+            else:
+                new_alpha_delta = (alpha_delta + achievable_alpha_delta) / 2
+            new_alpha_delta = max(
+                min(new_alpha_delta, achievable_alpha_delta - 0.001), 0)
+            print(f"alpha_delta goes from {alpha_delta} to {new_alpha_delta}")
+            alpha_delta = new_alpha_delta
+            #############################
+            
+            # Calculate elapsed time from the very start
             elapsed_time = time.time() - start_time
             elapsed_hours = int(elapsed_time // 3600)
             elapsed_minutes = int((elapsed_time % 3600) // 60)
@@ -225,39 +180,27 @@ def run_hypernetwork_with_architecture(target_arch, hn_config, time_limit_minute
             elapsed_time_str = (
                 f"{elapsed_hours:02d}h:{elapsed_minutes:02d}m:{elapsed_seconds:02d}s"
             )
-
+            
+            # Check current allocative ratio vs max allocative ratio
             current_ratio = alpha - total_error
-              
-            # Check if max allocative ratio improved and update time tracking
             if current_ratio > max_allocative_ratio:
                 time_of_last_max_improvement = time.time()
                 max_allocative_ratio = current_ratio
-            
-            # Calculate time since last max improvement
             time_since_improvement = time.time() - time_of_last_max_improvement
             hours_since = int(time_since_improvement // 3600)
             minutes_since = int((time_since_improvement % 3600) // 60)
             seconds_since = int(time_since_improvement % 60)
             time_since_str = f"{hours_since:02d}h:{minutes_since:02d}m:{seconds_since:02d}s"
-
+            #############################
+            
             # Check if no improvement for more than 2 hours
             if time_since_improvement > 2 * 3600:  # 2 hours in seconds
-                print(f"No improvement in max allocative ratio for {time_since_str}. Stopping training.")
+                print(f"⏰ No improvement in max allocative ratio for {time_since_str}. Stopping training.")
                 break
-
-            # Check if we've reached near-optimal allocative efficiency
-            optimal_ratio = 0.868421 
-            if current_ratio >= optimal_ratio - 0.0001:
-                print(
-                    f"NEAR-OPTIMAL ACHIEVED! Current ratio: {current_ratio:.8f}, Target: {optimal_ratio:.8f}"
-                )
-                print("Stopping training as we've reached near-optimal performance!")
-                break            
-            
-            # Store data for plotting
+            #############################
             allocative_ratios.append(current_ratio)
             iterations.append(iter_index)
-
+            
             print(
                 f"elapsed_time={elapsed_time_str} "
                 f"time_since_max_improvement={time_since_str} "
@@ -271,12 +214,11 @@ def run_hypernetwork_with_architecture(target_arch, hn_config, time_limit_minute
                 f"iteration_time={iteration_duration:.2f}s"
             )
             print(f"Current worst case allocative ratio: {current_ratio}")
-
-        # Plot the results
+        
         plot_allocative_ratios(iterations, allocative_ratios, target_arch, hn_config)
-
+    
         return max_allocative_ratio
-
+    
     finally:
         keyboard_listener.cleanup()
 
@@ -293,35 +235,16 @@ def hypernetwork_train(
     hypernetwork = hypernetwork.to(device)
     target_network = target_network.to(device)
 
-    # total_loss = 0
-    # losses = []
-    grad_norms = []
-    param_changes = []
-
-    # Store initial hypernetwork parameters for comparison
-    initial_params = [p.clone().detach() for p in hypernetwork.parameters()]
-
     for epoch in range(epochs):
         optimizer.zero_grad()
-
+        
         # Generate weights from the hypernetwork
         params = hypernetwork.get_parameters_for_target()
         params = [(w.to(device), b.to(device)) for w, b in params]
         target_network.update_params(params)
-
-        # Increase sample diversity significantly
-        if worst_case_profiles is None:
-            profiles_all = profiles + get_random_profiles(256)
-        else:
-            profiles_all = (
-                profiles
-                # + sample(
-                #     worst_case_profiles,
-                #     min(256, len(worst_case_profiles)),
-                # )
-                + get_random_profiles(256)
-            )
-
+        
+        profiles_all = profiles + get_random_profiles(32)
+        
         profiles_tensor = torch.tensor(
             [vectorized_kick(profile) for profile in profiles_all],
             dtype=torch.float32,
@@ -339,54 +262,20 @@ def hypernetwork_train(
                 torch.clamp(total_r - (n - (alpha - alpha_delta)) * s_tensor, min=0)
             )
         ) + torch.sum(torch.square(torch.clamp((n - 1) * s_tensor - total_r, min=0)))
+        current_loss = loss.item()
+        
+        # If solved this batch of profiles, break early
+        if math.isclose(current_loss, 0.0, abs_tol=0.0):
+            break
+        #############################
 
         loss.backward()
-
-        # Monitor gradient norms
-        total_grad_norm = 0
-        for p in hypernetwork.parameters():
-            if p.grad is not None:
-                total_grad_norm += p.grad.norm().item() ** 2
-        total_grad_norm = total_grad_norm**0.5
-        grad_norms.append(total_grad_norm)
-
+        
         # Gradient clipping for stability
-        torch.nn.utils.clip_grad_norm_(hypernetwork.parameters(), max_norm=1.0)
+        # torch.nn.utils.clip_grad_norm_(hypernetwork.parameters(), max_norm=1.0)
 
         optimizer.step()
-
-        current_loss = loss.item()
-        # Check if loss is exactly zero
-        if math.isclose(current_loss, 0.0, abs_tol=0.0):
-            # print("Loss is exactly zero, stopping training.")
-            break
-        # losses.append(current_loss)
-        # total_loss += current_loss
-
-        # Monitor parameter changes
-        # if epoch % 50 == 0:
-        #     param_change = 0
-        #     for initial, current in zip(initial_params, hypernetwork.parameters()):
-        #         param_change += (current - initial).norm().item()
-        #     param_changes.append(param_change)
-
-        #     # Monitor parameter changes
-        #     if epoch % 50 == 0:
-        #         param_change = 0
-        #         for initial, current in zip(initial_params, hypernetwork.parameters()):
-        #             param_change += (current - initial).norm().item()
-        #             param_changes.append(param_change)
-        #             print(
-        #             f"  Epoch {epoch}: Loss={current_loss:.6f}, GradNorm={total_grad_norm:.6f}, ParamChange={param_change:.6f}, AlphaDelta={alpha_delta:.6f}"
-        #             )
-
-    # Print training summary
-    # print(
-    #     f"Training summary: Final loss={losses[-1]:.6f}, Avg grad norm={np.mean(grad_norms):.6f}"
-    # )
-    # if len(grad_norms) > 0 and np.mean(grad_norms) < 1e-6:
-    #     print("WARNING: Very small gradients - potential vanishing gradient problem!")
-
+        
     return current_loss
 
 def plot_allocative_ratios(iterations, ratios, target_arch, hn_config):
@@ -517,10 +406,5 @@ class KeyboardListener:
                 termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
             except:
                 pass
-
-
-# Example usage:
-# ratio = evaluate_saved_model("Jun_09_15hr_50min_08sec-5-3-0-2-07466-0.00000751132112641884.saved")
-# story3_hypernetwork()
-# story3()
+            
 hypernetwork()
