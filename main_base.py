@@ -50,7 +50,7 @@ import termios
 
 
 def hypernetwork():
-    target_arch = [5, 20, 1]
+    target_arch = [5, 40, 1]
     hn_config = [768, 384, 192]
 
     run_hypernetwork_with_architecture(target_arch, hn_config)

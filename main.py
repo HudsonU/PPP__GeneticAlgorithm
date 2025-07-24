@@ -50,13 +50,38 @@ import termios
 
 
 def hypernetwork():
-    target_arch = [5, 20, 1]
-    hn_config = [768, 384, 192]
+    target_architectures = [
+        [4, 20, 1],
+    ]
 
-    run_hypernetwork_with_architecture(target_arch, hn_config)
+    hypernetwork_configs = [
+        [1024, 512, 256],
+    ]
+
+    results = {}
+    results_file = f"architecture_comparison_n=6_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+
+    for target_arch in target_architectures:
+        for hn_config in hypernetwork_configs:
+            print(f"\n\n{'='*60}")
+            print(f"Testing target: {target_arch}, hypernetwork: {hn_config}")
+            print(f"{'='*60}\n")
+
+            max_ratio = run_hypernetwork_with_architecture(
+                target_arch, hn_config, time_limit_minutes=18000
+            )
+            
+            arch_key = f"target_{'-'.join(map(str, target_arch))}_hn_{'-'.join(map(str, hn_config))}"
+            results[arch_key] = max_ratio
+
+            with open(results_file, "a") as f:
+                f.write(f"{arch_key}: {max_ratio}\n")
+
+            print(f"Result for {arch_key}: {max_ratio}")
 
 
-def run_hypernetwork_with_architecture(target_arch, hn_config):
+def run_hypernetwork_with_architecture(target_arch, hn_config, time_limit_minutes):
+    time_limit_seconds = time_limit_minutes * 60
     
     # Initialize the target network and hypernetwork
     target_network = FunctionalR(target_arch).to(device)
@@ -113,11 +138,20 @@ def run_hypernetwork_with_architecture(target_arch, hn_config):
         for iter_index in count(start=1):
             iteration_start_time = time.time()
             
+            # Check stopping conditions
+            elapsed_time_check = time.time() - start_time
+            if elapsed_time_check >= time_limit_seconds:
+                print(
+                    f"Time limit of {time_limit_minutes} minutes reached. Stopping training."
+                )
+                break
+            #############################
+            
             if keyboard_listener.stop_training:
                 print("Training stopped by user input.")
                 break
             
-            profiles = victor_profiles + worst_case_profiles[-32:]
+            profiles = victor_profiles + worst_case_profiles[-128:]
             
             # Train the hypernetwork
             training_start_time = time.time()
@@ -128,7 +162,7 @@ def run_hypernetwork_with_architecture(target_arch, hn_config):
                 profiles,
                 alpha_delta=alpha_delta,
                 device=device,
-                epochs=500,
+                epochs=300,
             )
             training_duration = time.time() - training_start_time
             #############################
@@ -194,7 +228,7 @@ def run_hypernetwork_with_architecture(target_arch, hn_config):
             #############################
             
             # Check if no improvement for more than 2 hours
-            if time_since_improvement > 2 * 3600:  # 2 hours in seconds
+            if time_since_improvement > 2 * 1800:  # 2 hours in seconds
                 print(f"⏰ No improvement in max allocative ratio for {time_since_str}. Stopping training.")
                 break
             #############################
@@ -238,12 +272,11 @@ def hypernetwork_train(
     for epoch in range(epochs):
         optimizer.zero_grad()
         
-        # Generate weights from the hypernetwork
-        params = hypernetwork.get_parameters_for_target()
-        params = [(w.to(device), b.to(device)) for w, b in params]
-        target_network.update_params(params)
+        # Generate flat parameters from the hypernetwork (optimized approach)
+        flat_params = hypernetwork.get_flat_parameters()
+        target_network.update_params_flat(flat_params)
         
-        profiles_all = profiles + get_random_profiles(32)
+        profiles_all = profiles + get_random_profiles(128)
         
         profiles_tensor = torch.tensor(
             [vectorized_kick(profile) for profile in profiles_all],
@@ -335,8 +368,19 @@ def evaluate_saved_model(saved_filename):
     """Load a saved model and run MIP analysis on it"""
 
     # Load the saved model
-    model_path = f"saved/{saved_filename}"
+    model_path = f"models/{saved_filename}"
     target_network = torch.load(model_path, map_location=device, weights_only=False)
+    
+    functional_state_dict = target_network.state_dict()
+    print("\n=== FunctionalR Parameters ===")
+    for param_name, param_tensor in functional_state_dict.items():
+        print(f"\nParameter: {param_name}")
+        print(f"Shape: {param_tensor.shape}")
+        print(f"Device: {param_tensor.device}")
+        print(f"Dtype: {param_tensor.dtype}")
+        print(f"Values:\n{param_tensor}")
+        print(f"Min: {param_tensor.min().item()}, Max: {param_tensor.max().item()}")
+        print("-" * 50)
 
     print(f"Loaded model: {saved_filename}")
     print(f"Model's achievable_alpha_delta: {target_network.achievable_alpha_delta}")
@@ -357,6 +401,8 @@ def evaluate_saved_model(saved_filename):
     current_ratio = alpha - total_error
 
     print(f"Results:")
+    print(f"  Worst case profile left: {wcp_left}")
+    print(f"  Worst case profile right: {wcp_right}")
     print(f"  Error left: {error_left:.20f}")
     print(f"  Error right: {error_right:.20f}")
     print(f"  Total error: {total_error:.20f}")
@@ -407,4 +453,5 @@ class KeyboardListener:
             except:
                 pass
             
-hypernetwork()
+evaluate_saved_model("Jun_09_15hr_50min_08sec-5-3-0-2-07466-0.00000751132112641884.saved")            
+# hypernetwork()

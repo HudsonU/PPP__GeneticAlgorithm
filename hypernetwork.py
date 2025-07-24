@@ -124,3 +124,12 @@ class Hypernetwork(nn.Module):
         if self.target_shapes is not None:
             return self.split_params_for_layers(flat_params, self.target_shapes)
         return flat_params
+    
+    def get_flat_parameters(self):
+        """
+        Generate flat parameters directly without splitting.
+        
+        Returns:
+            Tensor: Flat parameter tensor
+        """
+        return self.forward()

@@ -99,6 +99,10 @@ class FunctionalR(nn.Module):
         # Flag to determine whether to use external parameters
         self.using_external_params = False
         self.external_params = None
+        self.flat_params = None
+        
+        # Pre-compute parameter indices for efficient slicing
+        self._compute_param_indices()
         
         # Load initial state if provided
         if initial_state_dict is not None:
@@ -106,6 +110,34 @@ class FunctionalR(nn.Module):
         
         # Store initial state for reset capability
         self.initial_state_dict = deepcopy(self.state_dict())
+    
+    def _compute_param_indices(self):
+        """Pre-compute indices for slicing flat parameter tensor"""
+        self.param_indices = []
+        start_idx = 0
+        
+        for i in range(len(self.shapes) - 1):
+            # Weight tensor shape and size
+            weight_shape = (self.shapes[i+1], self.shapes[i])
+            weight_size = self.shapes[i+1] * self.shapes[i]
+            weight_end = start_idx + weight_size
+            
+            # Bias tensor shape and size  
+            bias_shape = (self.shapes[i+1],)
+            bias_size = self.shapes[i+1]
+            bias_end = weight_end + bias_size
+            
+            # Store indices and shapes for this layer
+            self.param_indices.append({
+                'weight_start': start_idx,
+                'weight_end': weight_end,
+                'weight_shape': weight_shape,
+                'bias_start': weight_end,
+                'bias_end': bias_end,
+                'bias_shape': bias_shape
+            })
+            
+            start_idx = bias_end
     
     def get_parameter_shapes(self):
         """
@@ -126,13 +158,46 @@ class FunctionalR(nn.Module):
         self.load_state_dict(self.initial_state_dict)
         self.using_external_params = False
     
-    def update_params(self, params):
+    def update_params_flat(self, flat_params):
+        """Update parameters from flat parameter tensor with pre-computed indices"""
+        if self.param_indices is None:
+            self._compute_param_indices()
+            
+        # Get device from first layer parameter
+        target_device = next(self.parameters()).device
+        
+        # Move flat tensor to device once
+        if flat_params.device != target_device:
+            flat_params = flat_params.to(target_device)
+        
+        # Initialize storage for weights and biases if not exists
+        if not hasattr(self, 'weights'):
+            self.weights = [None] * len(self.param_indices)
+        if not hasattr(self, 'biases'):
+            self.biases = [None] * len(self.param_indices)
+        
+        for i, indices in enumerate(self.param_indices):
+            # Extract weight and bias using pre-computed indices
+            weight = flat_params[indices['weight_start']:indices['weight_end']].view(indices['weight_shape'])
+            bias = flat_params[indices['bias_start']:indices['bias_end']].view(indices['bias_shape'])
+            
+            # Store parameters
+            self.weights[i] = weight
+            self.biases[i] = bias
+            
+        self.params_updated = True
+        self.using_external_params = True
+    
+    def update_params(self, weights, biases):
         """
         Update the network to use externally provided parameters.
         Args:
-            params: List of (weight, bias) tuples
+            weights: List of weight tensors
+            biases: List of bias tensors  
         """
-        self.external_params = params
+        self.weights = weights
+        self.biases = biases
+        self.params_updated = True
         self.using_external_params = True
     
     def forward(self, x):
@@ -151,11 +216,20 @@ class FunctionalR(nn.Module):
                     x = F.relu(x)
         else:
             # Use functional operations with external parameters
-            for i, (weight, bias) in enumerate(self.external_params):
-                x = F.linear(x, weight, bias)
-                # Apply ReLU to all but the last layer
-                if i < len(self.external_params) - 1:
-                    x = F.relu(x)
+            if hasattr(self, 'weights') and hasattr(self, 'biases'):
+                # Use flat parameter format (weights and biases lists)
+                for i in range(len(self.weights)):
+                    x = F.linear(x, self.weights[i], self.biases[i])
+                    # Apply ReLU to all but the last layer
+                    if i < len(self.weights) - 1:
+                        x = F.relu(x)
+            elif self.external_params is not None:
+                # Use legacy format (list of (weight, bias) tuples)
+                for i, (weight, bias) in enumerate(self.external_params):
+                    x = F.linear(x, weight, bias)
+                    # Apply ReLU to all but the last layer
+                    if i < len(self.external_params) - 1:
+                        x = F.relu(x)
         
         return x
     
@@ -180,9 +254,16 @@ class FunctionalR(nn.Module):
                 biases.append(layer.bias.data.cpu().numpy())
         else:
             # Use the external parameters
-            for weight, bias in self.external_params:
-                weights.append(weight.data.cpu().numpy())
-                biases.append(bias.data.cpu().numpy())
+            if hasattr(self, 'weights') and hasattr(self, 'biases'):
+                # New flat parameter format
+                for i in range(len(self.weights)):
+                    weights.append(self.weights[i].data.cpu().numpy())
+                    biases.append(self.biases[i].data.cpu().numpy())
+            elif self.external_params is not None:
+                # Legacy format
+                for weight, bias in self.external_params:
+                    weights.append(weight.data.cpu().numpy())
+                    biases.append(bias.data.cpu().numpy())
         
         for i, weight in enumerate(weights):
             assert weight.shape[0] == self.shapes[i + 1]
