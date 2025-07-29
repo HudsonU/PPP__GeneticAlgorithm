@@ -75,56 +75,6 @@ class Hypernetwork(nn.Module):
         dummy_input = torch.ones(1, 1, device=next(self.parameters()).device)  # Dummy input to trigger the forward pass on same device as model
         return self.model(dummy_input).squeeze(0)  # Remove batch dimension
     
-    @staticmethod
-    def split_params_for_layers(flat_params, layer_shapes):
-        """
-        Splits a flat parameter tensor into weights and biases for multiple layers.
-        
-        Args:
-            flat_params (Tensor): Flat tensor of parameters
-            layer_shapes (list): List of tuples [(weight_shape, bias_shape), ...] for each layer
-            
-        Returns:
-            list: List of tuples (weight, bias) for each layer
-        """
-        params_list = []
-        start_idx = 0
-        
-        for layer_shape in layer_shapes:
-            weight_shape, bias_shape = layer_shape
-            
-            # Calculate number of parameters for weight and bias
-            weight_size = np.prod(weight_shape)
-            bias_size = np.prod(bias_shape)
-            
-            # Extract and reshape weight
-            weight_end = start_idx + weight_size
-            weight = flat_params[start_idx:weight_end].reshape(weight_shape)
-            
-            # Extract and reshape bias
-            bias_end = weight_end + bias_size
-            bias = flat_params[weight_end:bias_end].reshape(bias_shape)
-            
-            # Update start index for next layer
-            start_idx = bias_end
-            
-            # Add to output list
-            params_list.append((weight, bias))
-            
-        return params_list
-
-    def get_parameters_for_target(self):
-        """
-        Generate parameters and split them for the target network.
-        
-        Returns:
-            list: List of tuples (weight, bias) for each layer
-        """
-        flat_params = self.forward()
-        if self.target_shapes is not None:
-            return self.split_params_for_layers(flat_params, self.target_shapes)
-        return flat_params
-    
     def get_flat_parameters(self):
         """
         Generate flat parameters directly without splitting.

@@ -72,7 +72,8 @@ def vectorized_kick(profile):
 ##################################################
 def s_batch(profiles):
     profiles = np.asarray(profiles)
-    return np.maximum(np.sum(profiles, axis=1), 1)
+    s_values = np.maximum(np.sum(profiles, axis=1), 1)
+    return s_values.reshape(-1, 1)
 
 def vectorized_kick_batch(profiles):
     profiles = np.asarray(profiles)

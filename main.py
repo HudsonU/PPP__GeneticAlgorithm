@@ -34,7 +34,9 @@ from utility import (
     alpha,
     victor_profiles,
     manual_error,
+    s,
     s_batch,
+    kick,
     vectorized_kick_batch,
     add_two_profiles,
     get_random_profiles,
@@ -452,5 +454,5 @@ class KeyboardListener:
             except:
                 pass
             
-evaluate_saved_model("Jun_09_15hr_50min_08sec-5-3-0-2-07466-0.00000751132112641884.saved")            
-# hypernetwork()
+# evaluate_saved_model("Jun_09_15hr_50min_08sec-5-3-0-2-07466-0.00000751132112641884.saved")            
+hypernetwork()
