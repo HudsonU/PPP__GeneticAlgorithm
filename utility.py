@@ -1,5 +1,6 @@
 from random import random
 from settings import n
+import numpy as np
 
 # Victor's conjectured upperbound: only kept 3 significant digits
 victor = {
@@ -55,17 +56,31 @@ alpha = victor[n]
 manual_error = victor[n] - manual[n]
 victor_profiles = [[0] * i + [1 / (n // 2)] * (n - i) for i in range(n + 1)]
 
-
+# Old operations, kept for reference and compatibility
+##################################################
 def s(profile):
     return max(sum(profile), 1)
-
 
 def kick(i, profile):
     return profile[:i] + profile[i + 1 :]  # noqa: E203
 
-
 def vectorized_kick(profile):
     return [kick(i, profile) for i in range(n)]
+##################################################
+
+# New batched operations
+##################################################
+def s_batch(profiles):
+    profiles = np.asarray(profiles)
+    return np.maximum(np.sum(profiles, axis=1), 1)
+
+def vectorized_kick_batch(profiles):
+    profiles = np.asarray(profiles)
+    n = profiles.shape[1]
+    idx = np.arange(n)
+    kicked = np.stack([np.delete(profiles, i, axis=1) for i in idx], axis=1)
+    return kicked
+##################################################
 
 
 def add_profile(new_p, profiles):

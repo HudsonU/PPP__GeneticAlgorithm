@@ -34,9 +34,8 @@ from utility import (
     alpha,
     victor_profiles,
     manual_error,
-    s,
-    kick,
-    vectorized_kick,
+    s_batch,
+    vectorized_kick_batch,
     add_two_profiles,
     get_random_profiles,
 )
@@ -266,8 +265,8 @@ def hypernetwork_train(
     worst_case_profiles=None,
     epochs=100,
 ):
-    hypernetwork = hypernetwork.to(device)
-    target_network = target_network.to(device)
+    # hypernetwork = hypernetwork.to(device)
+    # target_network = target_network.to(device)
 
     for epoch in range(epochs):
         optimizer.zero_grad()
@@ -279,12 +278,12 @@ def hypernetwork_train(
         profiles_all = profiles + get_random_profiles(128)
         
         profiles_tensor = torch.tensor(
-            [vectorized_kick(profile) for profile in profiles_all],
+            vectorized_kick_batch(profiles_all),
             dtype=torch.float32,
             device=device,
         )
         s_tensor = torch.tensor(
-            [[s(profile)] for profile in profiles_all],
+            s_batch(profiles_all),
             dtype=torch.float32,
             device=device,
         )
