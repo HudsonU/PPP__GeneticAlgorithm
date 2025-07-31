@@ -52,7 +52,7 @@ import termios
 
 def hypernetwork():
     target_architectures = [
-        [4, 20, 1],
+        [5, 20, 1],
     ]
 
     hypernetwork_configs = [
@@ -152,7 +152,7 @@ def run_hypernetwork_with_architecture(target_arch, hn_config, time_limit_minute
                 print("Training stopped by user input.")
                 break
             
-            profiles = victor_profiles + worst_case_profiles[-128:]
+            profiles = victor_profiles + worst_case_profiles[-256:]
             
             # Train the hypernetwork
             training_start_time = time.time()
@@ -163,7 +163,7 @@ def run_hypernetwork_with_architecture(target_arch, hn_config, time_limit_minute
                 profiles,
                 alpha_delta=alpha_delta,
                 device=device,
-                epochs=300,
+                epochs=500,
             )
             training_duration = time.time() - training_start_time
             #############################
@@ -229,7 +229,7 @@ def run_hypernetwork_with_architecture(target_arch, hn_config, time_limit_minute
             #############################
             
             # Check if no improvement for more than 2 hours
-            if time_since_improvement > 2 * 1800:  # 2 hours in seconds
+            if time_since_improvement > 20 * 1800:  # 2 hours in seconds
                 print(f"⏰ No improvement in max allocative ratio for {time_since_str}. Stopping training.")
                 break
             #############################
@@ -249,6 +249,11 @@ def run_hypernetwork_with_architecture(target_arch, hn_config, time_limit_minute
                 f"iteration_time={iteration_duration:.2f}s"
             )
             print(f"Current worst case allocative ratio: {current_ratio}")
+            # Break if allocative ratio is close to target value
+            target_ratio = 1 - 1 / (5 * (4 / 120 + 8 / 12))
+            if abs(current_ratio - target_ratio) < 0.0001:
+                print(f"Allocative ratio {current_ratio:.6f} is within 0.0001 of target {target_ratio:.6f}. Stopping training.")
+                break
         
         plot_allocative_ratios(iterations, allocative_ratios, target_arch, hn_config)
     
@@ -277,18 +282,26 @@ def hypernetwork_train(
         flat_params = hypernetwork.get_flat_parameters()
         target_network.update_params_flat(flat_params)
         
-        profiles_all = profiles + get_random_profiles(128)
+        profiles_all = profiles + get_random_profiles(256)
         
-        profiles_tensor = torch.tensor(
-            vectorized_kick_batch(profiles_all),
-            dtype=torch.float32,
-            device=device,
-        )
-        s_tensor = torch.tensor(
-            s_batch(profiles_all),
-            dtype=torch.float32,
-            device=device,
-        )
+        # profiles_tensor = torch.tensor(
+        #     vectorized_kick_batch(profiles_all),
+        #     dtype=torch.float32,
+        #     device=device,
+        # )
+        
+        profiles_np = vectorized_kick_batch(profiles_all) 
+        profiles_tensor = torch.from_numpy(profiles_np).float().to(device)
+
+        # s_tensor = torch.tensor(
+        #     s_batch(profiles_all),
+        #     dtype=torch.float32,
+        #     device=device,
+        # )
+        
+        s_np = s_batch(profiles_all)  
+        s_tensor = torch.from_numpy(s_np).float().to(device)
+        
         total_r = torch.sum(target_network(profiles_tensor), dim=1)
 
         loss = torch.sum(
@@ -306,7 +319,7 @@ def hypernetwork_train(
         loss.backward()
         
         # Gradient clipping for stability
-        # torch.nn.utils.clip_grad_norm_(hypernetwork.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(hypernetwork.parameters(), max_norm=1.0)
 
         optimizer.step()
         
@@ -454,5 +467,7 @@ class KeyboardListener:
             except:
                 pass
             
-# evaluate_saved_model("Jun_09_15hr_50min_08sec-5-3-0-2-07466-0.00000751132112641884.saved")            
+# Jul_31_15hr_40min_37sec-5-3-0-2-03995-0.00005244780750190969.saved
+# evaluate_saved_model("Jun_09_15hr_50min_08sec-5-3-0-2-07466-0.00000751132112641884.saved")         
+# evaluate_saved_model("Jul_31_15hr_40min_37sec-5-3-0-2-03995-0.00005244780750190969.saved")             
 hypernetwork()

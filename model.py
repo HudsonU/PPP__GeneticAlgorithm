@@ -188,18 +188,6 @@ class FunctionalR(nn.Module):
         self.params_updated = True
         self.using_external_params = True
     
-    def update_params(self, weights, biases):
-        """
-        Update the network to use externally provided parameters.
-        Args:
-            weights: List of weight tensors
-            biases: List of bias tensors  
-        """
-        self.weights = weights
-        self.biases = biases
-        self.params_updated = True
-        self.using_external_params = True
-    
     def forward(self, x):
         """
         Forward pass using either built-in parameters or externally provided ones.
@@ -208,29 +196,25 @@ class FunctionalR(nn.Module):
             x: Input tensor
         """
         if not self.using_external_params:
-            # Use standard nn.Module forward pass
             for i, layer in enumerate(self.layers):
                 x = layer(x)
-                # Apply ReLU to all but the last layer
                 if i < len(self.layers) - 1:
                     x = F.relu(x)
         else:
-            # Use functional operations with external parameters
             if hasattr(self, 'weights') and hasattr(self, 'biases'):
-                # Use flat parameter format (weights and biases lists)
+                # Ensure input dtype matches weights dtype
+                x = x.to(self.weights[0].dtype)
                 for i in range(len(self.weights)):
                     x = F.linear(x, self.weights[i], self.biases[i])
-                    # Apply ReLU to all but the last layer
                     if i < len(self.weights) - 1:
                         x = F.relu(x)
             elif self.external_params is not None:
-                # Use legacy format (list of (weight, bias) tuples)
+                # Ensure input dtype matches weights dtype
+                x = x.to(self.external_params[0][0].dtype)
                 for i, (weight, bias) in enumerate(self.external_params):
                     x = F.linear(x, weight, bias)
-                    # Apply ReLU to all but the last layer
                     if i < len(self.external_params) - 1:
                         x = F.relu(x)
-        
         return x
     
     def copy_state_dict(self, r):
