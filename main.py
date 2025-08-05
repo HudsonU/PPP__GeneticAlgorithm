@@ -1,48 +1,33 @@
-from typing import Optional, Iterable, Dict, Any, Tuple
-import torch.nn as nn
 import os
 import torch
 import time
 import torch.optim as optim
-import numpy as np
-import timeit
 import matplotlib.pyplot as plt
 import math
-from copy import deepcopy
-from math import ceil
 from hypernetwork import Hypernetwork
 from itertools import count
-from random import sample  # , randrange
 from pprint import pprint
 from settings import (
     n,
-    story,
-    env_shapes,
     finger_print,
-    # env_size,
     device,
     env_alpha_delta,
-    env_train_using_worst_case,
-    env_train_using_free_samples,
     resume_filename,
-    story3_worst_case_done_limit,
 )
 
 # from model import R, REnsemble  # mutate, crossover
 from utility import (
-    loss_schedule,
     alpha,
     victor_profiles,
     manual_error,
     s,
-    s_batch,
     kick,
+    s_batch,
     vectorized_kick_batch,
     add_two_profiles,
     get_random_profiles,
 )
 from model import FunctionalR
-
 import threading
 import sys
 import select
@@ -50,9 +35,18 @@ import tty
 import termios
 
 
+def format_elapsed_time(start_time):
+    """Calculate and format elapsed time as HH:MM:SS or HH_MM_SS format"""
+    elapsed_time = time.time() - start_time
+    elapsed_hours = int(elapsed_time // 3600)
+    elapsed_minutes = int((elapsed_time % 3600) // 60)
+    elapsed_seconds = int(elapsed_time % 60)
+    return elapsed_time, f"{elapsed_hours:02d}h:{elapsed_minutes:02d}m:{elapsed_seconds:02d}s", f"{elapsed_hours:02d}h_{elapsed_minutes:02d}m_{elapsed_seconds:02d}s"
+
+
 def hypernetwork():
     target_architectures = [
-        [5, 20, 1],
+        [6, 20, 1],
     ]
 
     hypernetwork_configs = [
@@ -116,11 +110,8 @@ def run_hypernetwork_with_architecture(target_arch, hn_config, time_limit_minute
             print(f"restored achievable_alpha_delta to {achievable_alpha_delta}")
     alpha_delta = max(achievable_alpha_delta - 0.001, 0)
     #############################
-    
-    train_using_worst_case = env_train_using_worst_case == 1
-    train_using_free_samples = env_train_using_free_samples == 1
     print(
-        f"hypernetwork {finger_print} alpha_delta={alpha_delta}, train_using_worst_case={train_using_worst_case}, train_using_free_samples={train_using_free_samples}"
+        f"hypernetwork {finger_print} alpha_delta={alpha_delta}"
     )
     
     keyboard_listener = KeyboardListener()
@@ -187,13 +178,15 @@ def run_hypernetwork_with_architecture(target_arch, hn_config, time_limit_minute
             iteration_duration = time.time() - iteration_start_time   
             ############################# 
             
-            # Alpha delta adjustment
-            if total_error < min(total_error_history, default=(1000, 0))[0]:
+            # Save model 
+            should_save_model = total_error < min(total_error_history, default=(1000, 0))[0]
+            if should_save_model:
                 target_network.achievable_alpha_delta = achievable_alpha_delta
                 fn = f"saved/{finger_print}-{iter_index:05}-{total_error:.20f}.saved"
                 # Ensure the directory exists [trungtruong]
                 os.makedirs(os.path.dirname(fn), exist_ok=True)
                 torch.save(target_network, fn)
+
             total_error_history.append((total_error, iter_index))
             achievable_alpha_delta = min(achievable_alpha_delta, total_error)
 
@@ -208,16 +201,33 @@ def run_hypernetwork_with_architecture(target_arch, hn_config, time_limit_minute
             #############################
             
             # Calculate elapsed time from the very start
-            elapsed_time = time.time() - start_time
-            elapsed_hours = int(elapsed_time // 3600)
-            elapsed_minutes = int((elapsed_time % 3600) // 60)
-            elapsed_seconds = int(elapsed_time % 60)
-            elapsed_time_str = (
-                f"{elapsed_hours:02d}h:{elapsed_minutes:02d}m:{elapsed_seconds:02d}s"
-            )
+            elapsed_time, elapsed_time_str, elapsed_time_underscore = format_elapsed_time(start_time)
             
             # Check current allocative ratio vs max allocative ratio
             current_ratio = alpha - total_error
+            
+            # Save hypernetwork model
+            if should_save_model:
+                os.makedirs("hypernets", exist_ok=True)
+                timestamp = time.strftime("%b_%d_%Hhr_%Mmin_%Ssec")
+                hn_filename = f"hypernets/{timestamp}-n{n}-ratio{current_ratio:.8f}-time{elapsed_time_str}-{finger_print}.hn"
+                
+                save_data = {
+                    'hypernetwork_state_dict': hypernetwork.state_dict(),
+                    'max_allocative_ratio': current_ratio,
+                    'elapsed_time_seconds': elapsed_time,
+                    'elapsed_time_formatted': elapsed_time_str,
+                    'n': n,
+                    'finger_print': finger_print,
+                    'target_arch': target_arch,
+                    'hn_config': hn_config,
+                    'timestamp': timestamp,
+                    'iteration': iter_index,
+                    'total_error': total_error
+                }
+                
+                torch.save(save_data, hn_filename)
+            
             if current_ratio > max_allocative_ratio:
                 time_of_last_max_improvement = time.time()
                 max_allocative_ratio = current_ratio
@@ -250,7 +260,17 @@ def run_hypernetwork_with_architecture(target_arch, hn_config, time_limit_minute
             )
             print(f"Current worst case allocative ratio: {current_ratio}")
             # Break if allocative ratio is close to target value
-            target_ratio = 1 - 1 / (5 * (4 / 120 + 8 / 12))
+            target_ratios = {
+                3: 2 / 3,
+                4: 2 / 3,
+                5: 1 - 1 / (5 * (4 / 120 + 8 / 12)),
+                6: 0.868,
+                7: 0.748,
+                8: 0.755,
+                9: 0.772,
+                10: 0.882,
+            }
+            target_ratio = target_ratios.get(n, None)
             if abs(current_ratio - target_ratio) < 0.0001:
                 print(f"Allocative ratio {current_ratio:.6f} is within 0.0001 of target {target_ratio:.6f}. Stopping training.")
                 break
