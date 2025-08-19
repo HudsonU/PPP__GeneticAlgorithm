@@ -38,6 +38,8 @@ figures/
 
 # Model checkpoints and saved networks
 saved/
+best_hypernets/
+hypernets/
 checkpoints/
 models/
 *.pth
@@ -98,8 +100,7 @@ hypernetwork_results_*.txt
 filenames.txt
 filenames_processed.txt
 
-# Shell scripts (if they contain sensitive paths/configs)
-*.sh
+
 
 # MLD directory (if it contains generated/temporary files)
 mld/
