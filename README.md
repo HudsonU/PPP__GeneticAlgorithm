@@ -1,0 +1,1 @@
+Simply running the run_script.sh should be okay. However, the architecture of the target network and the hypernetwork is hardcoded in main. Modify it so that it fits a different n. Ex: n = 5, then set n = 5 in the script, and the target network's first layer should be 4 (n-1). 
