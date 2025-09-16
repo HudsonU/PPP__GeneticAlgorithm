@@ -1,24 +1,53 @@
-import torch
+# everything in this file is used to change GA/project settings
 import os
-import datetime
 import numpy as np
-from zoneinfo import ZoneInfo
 from random import seed
+from datetime import datetime, timezone
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(device)
+# number of agents
+n = 3
 
-try:
-    env_seed = int(os.environ["seed"])
-except KeyError:
-    env_seed = 0
+# set time limit for each episode in hours
+time_limit = 12
 
-seed(env_seed)
-torch.manual_seed(env_seed)
-np.random.seed(env_seed)
+# number of worst case profiles to keep in memory
+BATCH_SIZE = 64
 
-n = int(os.environ["n"])
+# intial slack on alpha for mip and fitness
+init_alpha_delta = 0.0
 
+# seed for the environment, used to ensure reproducibility
+env_seed = 1121111
+
+# continue training from a previous run
+resume = False
+
+# number of generations to train before saving a model
+# and adding the worst case profile to the list
+epochs_before_analysis = 1
+
+# network configuration, refers to hidden layers and nodes
+min_layers = 1
+max_layers = 3
+min_nodes_per_layer = 2
+max_nodes_per_layer = 50
+
+########################## might try later #################################
+# relative costs for the network
+# e.g. if 2 networks have the same worst case, the one with more nodes will be penalized
+# e.g. final score = worst_case - cost_per_node * number_of_nodes
+# cost_per_node = 0.0001
+#############################################################################
+
+# Setting the date and time 
+dt = datetime.now(timezone.utc)
+
+# setting the environment seeds
+seed(env_seed) # python + NEAT random seed
+np.random.seed(env_seed) # numpy random seed
+
+###################### WHAT DOES STORY DO??? ######################
+# shapes can be ignored for neat
 try:
     story = int(os.environ["story"])
 except KeyError:
@@ -41,36 +70,32 @@ except KeyError:
 def get_timestamp():
     format_str = "%b_%d_%Hhr_%Mmin_%Ssec"
     #assert False, "anonymized timezone"
-    result = datetime.datetime.now(ZoneInfo("UTC")).strftime(format_str)
+    result = datetime.now(timezone.utc).strftime(format_str)
     return result
 
 
 finger_print = f"{get_timestamp()}-{n}-{story}-{env_seed}-{env_shapes_raw}"
 print(finger_print)
 
-if story == 3:
-    env_alpha_delta = int(os.environ["alphadelta"])
-    env_train_using_worst_case = int(os.environ["useworstcase"])
-    env_train_using_free_samples = int(os.environ["usefreesamples"])
-    story3_worst_case_done_limit = None
-else:
-    env_alpha_delta = None
-    env_train_using_worst_case = None
-    env_train_using_free_samples = None
-    story3_worst_case_done_limit = None
+# WHAT DO THESE MEAN???
+# if story == 3:
+#     env_alpha_delta = int(os.environ["alphadelta"])
+#     env_train_using_worst_case = int(os.environ["useworstcase"])
+#     env_train_using_free_samples = int(os.environ["usefreesamples"])
+#     story3_worst_case_done_limit = None
+# else:
+#     env_alpha_delta = None
+#     env_train_using_worst_case = None
+#     env_train_using_free_samples = None
+#     story3_worst_case_done_limit = None
 
-if story == 9:
-    story9_reinitialize_whole_network = int(os.environ["reinit"])
-    story9_small = int(os.environ["s9small"])
-    story9_prune_node = int(os.environ["prunenode"])
-    story9_lower_alpha_delta = int(os.environ["loweralphadelta"])
-else:
-    story9_reinitialize_whole_network = None
-    story9_small = None
-    story9_prune_node = None
-    story9_lower_alpha_delta = None
-
-try:
-    resume_filename = os.environ["resume"]
-except KeyError:
-    resume_filename = None
+# if story == 9:
+#     story9_reinitialize_whole_network = int(os.environ["reinit"])
+#     story9_small = int(os.environ["s9small"])
+#     story9_prune_node = int(os.environ["prunenode"])
+#     story9_lower_alpha_delta = int(os.environ["loweralphadelta"])
+# else:
+#     story9_reinitialize_whole_network = None
+#     story9_small = None
+#     story9_prune_node = None
+#     story9_lower_alpha_delta = None

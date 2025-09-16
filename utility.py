@@ -1,5 +1,5 @@
 from random import random
-from settings import n
+from settings import n as n_agents
 import numpy as np
 
 # Victor's conjectured upperbound: only kept 3 significant digits
@@ -15,6 +15,7 @@ victor = {
     10: 0.882,
 }
 
+# best manual values for n agents, only kept 3 significant digits
 manual = {
     3: 2 / 3,
     4: 0.625,
@@ -26,10 +27,12 @@ manual = {
     10: 0.550,
 }
 
+# best manual values for n agents based on guo's paper
 for i in range(11, 21):
     victor[i] = 1
     manual[i] = (i + 1) / (2 * i)
 
+#???
 achieved_by_story9 = {
     3: 0,
     4: 0,
@@ -40,7 +43,7 @@ achieved_by_story9 = {
     9: 0.09840350518150806,
     10: 0.20024883504189483,
 }
-
+#???
 achieved_by_story3_1hr = {
     3: 0,
     4: 0,
@@ -52,9 +55,14 @@ achieved_by_story3_1hr = {
     10: 0.25759407474829893,
 }
 
-alpha = victor[n]
-manual_error = victor[n] - manual[n]
-victor_profiles = [[0] * i + [1 / (n // 2)] * (n - i) for i in range(n + 1)]
+# alpha = the conjectured upperbound
+alpha = victor[n_agents]
+
+# manual = the best known manual solution
+manual_error = victor[n_agents] - manual[n_agents]
+
+# initial profiles: from all 0 to all 1/(n/2), step 1/(n/2)
+victor_profiles = [[0] * i + [1 / ((n_agents) // 2)] * ((n_agents) - i) for i in range(n_agents)]
 
 # Old operations, kept for reference and compatibility
 ##################################################
@@ -65,11 +73,13 @@ def kick(i, profile):
     return profile[:i] + profile[i + 1 :]  # noqa: E203
 
 def vectorized_kick(profile):
-    return [kick(i, profile) for i in range(n)]
+    return [kick(i, profile) for i in range(n_agents)]
 ##################################################
 
 # New batched operations
 ##################################################
+
+# takes in a batch of profiles, returns a column vector of s values
 def s_batch(profiles):
     profiles = np.asarray(profiles)
     s_values = np.maximum(np.sum(profiles, axis=1), 1)
@@ -83,20 +93,30 @@ def vectorized_kick_batch(profiles):
     return kicked
 ##################################################
 
+# called by add_two_profiles, chechs if new_p is sufficiently different from existing profiles
+def add_profile(new_p, profiles, minDif=1e-6):
+    new_p = np.array(new_p, dtype=float)
+    if len(profiles) == 0:
+        return [new_p]
 
-def add_profile(new_p, profiles):
-    updated_profiles = []
-    for old_p in profiles:
-        if sum(abs(x - y) for x, y in zip(old_p, new_p)) >= 0.000001:
-            updated_profiles.append(old_p)
-    updated_profiles.append(new_p)
+    profiles_np = np.array(profiles, dtype=float)
+
+    # Compute distance (sum of absolute differences) for each old profile
+    diffs = np.sum(np.abs(profiles_np - new_p), axis=1)
+
+    # Keep only profiles that are different enough
+    mask = diffs >= minDif
+    updated_profiles = profiles_np[mask].tolist()
+
+    # Add the new profile
+    updated_profiles.append(new_p.tolist())
     return updated_profiles
 
-
+# adds two profiles to the list
 def add_two_profiles(new_p1, new_p2, profiles):
     return add_profile(new_p2, add_profile(new_p1, profiles))
 
-
+# init the random profiles
 def get_random_profiles(count, guided=True):
     # from victor's paper, perhaps this kind of more "guided" profiles are helpful
     def get_random_bid():
@@ -106,13 +126,13 @@ def get_random_profiles(count, guided=True):
         if select <= 1 / 3:
             return 0
         elif select <= 2 / 3:
-            return 1 / (n // 2)
+            return 1 / ((n_agents) // 2)
         else:
             return random()
 
-    return [list(sorted(get_random_bid() for _ in range(n))) for _ in range(count)]
+    return [list(sorted(get_random_bid() for _ in range(n_agents))) for _ in range(count)]
 
-
+# NOT USED, NOT SURE WHAT IT DID
 def loss_schedule(train_count):
     res = 0
     for i in range(1, train_count + 1):
