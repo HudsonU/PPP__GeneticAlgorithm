@@ -26,8 +26,8 @@ class FullyConnectedToOutputReproduction(neat.DefaultReproduction):
         all_keys = list(genome.nodes.keys()) + list(genome_config.input_keys)
         G.add_nodes_from(all_keys)
         for (src, dst), conn in genome.connections.items():
-            if conn.enabled:
-                G.add_edge(src, dst)
+            conn.enabled = True  # Ensure all connections are enabled
+            G.add_edge(src, dst)
         
         output = genome_config.output_keys[0]
         input_keys = list(genome_config.input_keys)

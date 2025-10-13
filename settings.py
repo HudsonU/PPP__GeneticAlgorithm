@@ -11,22 +11,28 @@ n = 3
 time_limit = 12
 
 # number of worst case profiles to keep in memory
-BATCH_SIZE = 64
+BATCH_SIZE = 256
+
+# dynamic mutation settings
+dynamic_mutation = True
+min_mutation_power = 0.001
+max_mutation_power = 1
+mutation_adjustment = 0.1  # NOT USED: how much to change mutation rate by (cur*(1 +/- mutation_adjustment))
 
 # intial slack on alpha for mip and fitness
-init_alpha_delta = 0.0
+init_alpha_delta = 0.1
 
 # seed for the environment, used to ensure reproducibility
-env_seed = 1121111
+env_seed = 3223433
 
 # continue training from a previous run
 resume = False
 
 # number of generations to train before saving a model
 # and adding the worst case profile to the list
-epochs_before_analysis = 1
+epochs_before_analysis = 10
 
-# network configuration, refers to hidden layers and nodes
+# NOT USED network configuration, refers to hidden layers and nodes
 min_layers = 1
 max_layers = 3
 min_nodes_per_layer = 2
@@ -46,27 +52,6 @@ dt = datetime.now(timezone.utc)
 seed(env_seed) # python + NEAT random seed
 np.random.seed(env_seed) # numpy random seed
 
-###################### WHAT DOES STORY DO??? ######################
-# shapes can be ignored for neat
-try:
-    story = int(os.environ["story"])
-except KeyError:
-    print("by default, set story to 0, i.e., the playground")
-    story = 0
-
-try:
-    env_shapes_raw = os.environ["shapes"]
-    env_shapes = [n - 1] + [int(x) for x in env_shapes_raw.split("-")] + [1]
-except KeyError:
-    env_shapes_raw = None
-    env_shapes = None
-
-try:
-    env_size = int(os.environ["size"])
-except KeyError:
-    env_size = 2
-
-
 def get_timestamp():
     format_str = "%b_%d_%Hhr_%Mmin_%Ssec"
     #assert False, "anonymized timezone"
@@ -74,8 +59,8 @@ def get_timestamp():
     return result
 
 
-finger_print = f"{get_timestamp()}-{n}-{story}-{env_seed}-{env_shapes_raw}"
-print(finger_print)
+#finger_print = f"{get_timestamp()}-{n}-{story}-{env_seed}-{env_shapes_raw}"
+#print(finger_print)
 
 # WHAT DO THESE MEAN???
 # if story == 3:

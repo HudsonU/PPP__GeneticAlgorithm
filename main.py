@@ -1,24 +1,28 @@
 import os
 import neat
 import time
-import matplotlib.pyplot as plt
 import math
 import msvcrt
-import time
 import numpy as np
 from itertools import count
+from concurrent.futures import ProcessPoolExecutor
 import pickle
-import Pulp_utils
+from functools import partial
 import threading
+
+import Pulp_utils
 from NEAT_Reproduction import FullyConnectedToOutputReproduction
 from settings import (
     n,
-    finger_print,
     resume,
     epochs_before_analysis,
     time_limit,
     BATCH_SIZE,
-    init_alpha_delta
+    init_alpha_delta,
+    mutation_adjustment,
+    min_mutation_power,
+    max_mutation_power,
+    dynamic_mutation,
 )
 from utility import (
     alpha,
@@ -31,26 +35,13 @@ from utility import (
     add_two_profiles,
     get_random_profiles,
 )
-# Initialize plot for real-time updates
-plt.ion()  # interactive mode ON
-fig, ax = plt.subplots(figsize=(12, 8))
-line, = ax.plot([], [], "b-", linewidth=2, label="Current Ratio")
-ax.set_xlabel("Iteration", fontsize=12)
-ax.set_ylabel("Allocative Efficiency Ratio", fontsize=12)
-ax.set_title("Allocative Efficiency Progress", fontsize=14)
-ax.grid(True, alpha=0.3)
-ax.legend() 
 
-# Load NEAT configuration
-config_path = "neat_config.ini"
-neat_config = neat.Config(
-    neat.DefaultGenome,
-    neat.DefaultReproduction,
-    neat.DefaultSpeciesSet,
-    neat.DefaultStagnation,
-    config_path
-)
-#neat_config.reproduction_type = FullyConnectedToOutputReproduction
+
+# Do NOT import matplotlib.pyplot or create GUI/plot objects at import-time.
+# Do NOT instantiate NetVisualiser at module import time (it may create GUI objects).
+# Both are created inside run_training below so they only exist in the main process.
+
+
 # get the elapsed time since start_time, format as HH:MM:SS and HH_MM_SS
 def format_elapsed_time(start_time):
     """Calculate and format elapsed time as HH:MM:SS or HH_MM_SS format"""
@@ -58,321 +49,337 @@ def format_elapsed_time(start_time):
     elapsed_hours = int(elapsed_time // 3600)
     elapsed_minutes = int((elapsed_time % 3600) // 60)
     elapsed_seconds = int(elapsed_time % 60)
-    return elapsed_time, f"{elapsed_hours:02d}h:{elapsed_minutes:02d}m:{elapsed_seconds:02d}s", f"{elapsed_hours:02d}h_{elapsed_minutes:02d}m_{elapsed_seconds:02d}s"
+    return (
+        elapsed_time,
+        f"{elapsed_hours:02d}h:{elapsed_minutes:02d}m:{elapsed_seconds:02d}s",
+        f"{elapsed_hours:02d}h_{elapsed_minutes:02d}m_{elapsed_seconds:02d}s",
+    )
 
-# save the population with extra info
-def save_checkpoint_with_info(population, generation, wcps, filename='checkpoint_full.pkl'):
-    """
-    Save NEAT population + extra info in a single file.
-    
-    population : neat.Population
-    generation : int
-    wcps : dict 
-    filename   : str
-    """
-    checkpoint_data = {
-        'population': population,
-        'generation': generation,
-        'wcps': wcps
-    }
-    
-    with open(filename, 'wb') as f:
+
+# save / load checkpoint utilities (unchanged)
+def save_checkpoint_with_info(population, generation, wcps, filename="checkpoint_full.pkl"):
+    checkpoint_data = {"population": population, "generation": generation, "wcps": wcps}
+    with open(filename, "wb") as f:
         pickle.dump(checkpoint_data, f)
     print(f"Checkpoint saved: {filename}")
 
-def load_checkpoint_with_info(filename='checkpoint_full.pkl'):
-    """
-    Load NEAT population + extra info from a checkpoint file.
 
-    Returns
-    -------
-    population : neat.Population
-        The saved NEAT population.
-    generation : int
-        The saved generation number.
-    wcps : dict
-        The saved worst-case profiles.
-    """
-    with open(filename, 'rb') as f:
+def load_checkpoint_with_info(filename="checkpoint_full.pkl"):
+    with open(filename, "rb") as f:
         checkpoint_data = pickle.load(f)
-
-    # Defensive checks
-    if not all(k in checkpoint_data for k in ('population', 'generation', 'wcps')):
+    if not all(k in checkpoint_data for k in ("population", "generation", "wcps")):
         raise ValueError(f"Checkpoint file {filename} is missing required keys.")
+    return checkpoint_data["population"], checkpoint_data["generation"], checkpoint_data["wcps"]
 
-    return checkpoint_data['population'], checkpoint_data['generation'], checkpoint_data['wcps']
 
-
-def eval_genomes(genomes, config, worst_case_profiles, alpha, alpha_delta, n):
+# -------------------------
+# Evaluation helpers
+# -------------------------
+def eval_single_genome(
+    genome_id, genome, config, worst_case_profiles, alpha, alpha_delta, n, tol=1e-4
+):
     """
-    Evaluate GA candidates for VCG redistribution efficiency.
+    Evaluate a single genome. Returns (genome_id, fitness, wca, infeasible_flag, max_violation).
     """
-    if not worst_case_profiles:
+    net = neat.nn.FeedForwardNetwork.create(genome, config)
+    infeasible = False
+    worst_alpha = alpha
+    max_violation = 0.0
+    alpha_use = alpha - alpha_delta
+
+    profiles = np.asarray(worst_case_profiles, dtype=float)
+    m = profiles.shape[0]
+    if m == 0:
         raise ValueError("worst_case_profiles is empty")
 
-    for genome_id, genome in genomes:
-        net = neat.nn.FeedForwardNetwork.create(genome, config)
-        infeasible = False
-        worst_ratio = float("inf")
-        max_violation = 0.0
+    for theta in profiles:
+        if len(theta) != n:
+            raise ValueError(f"profile length {len(theta)} != expected {n}")
 
-        for theta in worst_case_profiles:
-            theta = np.asarray(theta, dtype=float)
-            if len(theta) != n:
-                raise ValueError(f"Profile length {len(theta)} != expected {n}")
+        s_theta = max(np.sum(theta), 1.0)
 
-            # First-best welfare for this profile
-            s_theta = max(np.sum(theta), 1.0)
+        # compute S = sum_i net(theta_minus_i)
+        S = 0.0
+        for i in range(n):
+            theta_minus_i = np.concatenate([theta[:i], theta[i + 1 :]])
+            h_val = float(net.activate(list(theta_minus_i))[0])
+            S += h_val
 
-            # Total redistributed payments S(theta)
-            S = 0.0
-            for i in range(n):
-                theta_minus_i = np.concatenate([theta[:i], theta[i+1:]])
-                h_val = float(net.activate(list(theta_minus_i))[0])
-                S += h_val
+        left_error = (n - 1) * s_theta - S
+        right_error = S - (n - (alpha_use)) * s_theta
+        total_error = max(0.0, left_error) + max(0.0, right_error)
 
-            # Check inequality bounds for feasibility
-            left_error = (n - 1) * s_theta - S         # should be ≤ 0
-            right_error = S - (n - alpha) * s_theta    # should be ≤ 0
-            total_error = max(0.0, left_error) + max(0.0, right_error)
+        if total_error > max_violation:
+            max_violation = total_error
 
-            max_violation = max(max_violation, total_error)
+        if total_error > tol:
+            infeasible = True
+            continue
 
-            if total_error > 1e-3 + alpha_delta:
-                infeasible = True
-                continue
+        achieved_alpha = n - S / s_theta
+        if achieved_alpha < worst_alpha:
+            worst_alpha = achieved_alpha
 
-            # Compute allocative efficiency ratio
-            achieved = n * s_theta - S
-            efficiency_ratio = achieved / (s_theta + 1e-9)
+    if infeasible:
+        fitness = -max_violation
+    else:
+        fitness = max(0.0, worst_alpha)
 
-            # Track worst-case (minimum) ratio
-            if efficiency_ratio < worst_ratio:
-                worst_ratio = efficiency_ratio
+    return (genome_id, fitness, worst_alpha, infeasible, max_violation)
 
-        # Assign genome fitness
-        if infeasible:
-            # Penalize infeasible networks by negative of max violation
-            genome.fitness = -max_violation
-        else:
-            genome.fitness = worst_ratio
 
-        # Store worst-case ratio for logging/debugging
-        genome.wcr = worst_ratio
-    
+# Top-level worker that is picklable by ProcessPoolExecutor
+def eval_genome_task(pair, config, worst_case_profiles, alpha, alpha_delta, n):
+    """
+    pair: (genome_id, genome)
+    This wrapper is module-level (not nested) so it can be pickled on spawn.
+    """
+    gid, genome = pair
+    return eval_single_genome(gid, genome, config, worst_case_profiles, alpha, alpha_delta, n)
 
-# sets up time limit, sets up network and training vars
-# begins main training loop, 
-# CHANGE THIS -> each loops runs hypernetwork_train, then worst-case analysis
-# updates profiles, saves models and plots results
-def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, population=None,wcp=None):
+
+def eval_genomes_in_parallel(
+    genome_pairs, config, worst_case_profiles, alpha, alpha_delta, n, max_workers, chunksize
+):
+    """
+    Evaluates genomes in parallel using ProcessPoolExecutor.
+    Writes fitness/wca back into genome objects in parent process after collecting results.
+    """
+    worst_case_profiles = np.asarray(worst_case_profiles, dtype=float)
+
+    # Partial bind constants; eval_genome_task accepts (pair, config, worst_case_profiles, alpha,...)
+    worker = partial(
+        eval_genome_task,
+        config=config,
+        worst_case_profiles=worst_case_profiles,
+        alpha=alpha,
+        alpha_delta=alpha_delta,
+        n=n,
+    )
+
+    tasks = [(gid, genome) for (gid, genome) in genome_pairs]
+
+    results = []
+    with ProcessPoolExecutor(max_workers=max_workers) as exe:
+        # map picks each item from `tasks` and passes it as the first (pair) argument to `worker`.
+        for res in exe.map(worker, tasks, chunksize=chunksize):
+            results.append(res)
+
+    # write results back into genome objects (parent process)
+    id_to_genome = {gid: g for (gid, g) in genome_pairs}
+    for gid, fitness, worst_alpha, infeasible, max_violation in results:
+        genome_obj = id_to_genome[gid]
+        genome_obj.fitness = fitness
+        genome_obj.wca = worst_alpha
+
+    return
+
+
+def neat_evaluator(genomes, config, profiles, alpha, alpha_delta, n):
+    # Choose number of workers; limit to a reasonable number for your machine
+    max_workers = min(os.cpu_count() or 1, 16)
+    eval_genomes_in_parallel(
+        list(genomes),
+        config,
+        profiles,
+        alpha,
+        alpha_delta,
+        n,
+        max_workers=max_workers,
+        chunksize=8,
+    )
+
+
+# Plot update; import matplotlib locally so module import-time won't touch GUI
+def update_plot(iterations, ratios, ax, line):
+    import matplotlib.pyplot as plt
+
+    line.set_xdata(iterations)
+    line.set_ydata(ratios)
+    ax.relim()
+    ax.autoscale_view()
+    max_ratio = max(ratios)
+    stats_text = f"Iterations: {len(iterations)}\nMax: {max_ratio:.6f}\nFinal: {ratios[-1]:.6f}"
+    [t.remove() for t in ax.texts]
+    ax.text(
+        0.02,
+        0.98,
+        stats_text,
+        transform=ax.transAxes,
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
+    )
+    plt.pause(0.01)
+
+
+# Main training loop. Note: NetVisualiser / matplotlib created here in main process only.
+def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, population=None, wcp=None):
+    # import plotting and visualiser inside the main-run function (so child processes won't import them)
+    import matplotlib.pyplot as plt
+    from Neat_visual import NetVisualiser
+
+    # Initialize plot for real-time updates (main process only)
+    plt.ion()  # interactive mode ON
+    fig, ax = plt.subplots(figsize=(12, 8))
+    line, = ax.plot([], [], "b-", linewidth=2, label="Current Ratio")
+    ax.set_xlabel("Iteration", fontsize=12)
+    ax.set_ylabel("Allocative Efficiency Ratio", fontsize=12)
+    ax.set_title("Allocative Efficiency Progress", fontsize=14)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
     time_limit_seconds = time_limit_minutes * 60
-    #############################################################
-    #############################################################
-    #############################################################
-    # Initialize the neat population
-    if population == None:
+
+    if population is None:
         pop = neat.Population(neat_config)
     else:
         pop = population
-    #pop.add_reporter(neat.StdOutReporter(True)) 
-    #stats = neat.StatisticsReporter()
-    #pop.add_reporter(stats)
 
-    # initialise the profiles
-    #############################################################
-    #############################################################
-    #############################################################
-    
-    # add random profiles
-    if wcp == None:
-        worst_case_profiles = victor_profiles
+    # Create NetVisualiser in main process only
+    try:
+        visualiser = NetVisualiser(neat_config)
+    except Exception:
+        visualiser = None
+
+    best_fitness = -float("inf")
+    current_mutation = neat_config.genome_config.weight_mutate_power
+
+    if wcp is None:
+        worst_case_profiles = victor_profiles + get_random_profiles(32, n)
     else:
         worst_case_profiles = wcp
-    #worst_case_profiles = get_random_profiles(BATCH_SIZE, guided=True)
+
     total_error_history = []
-    
-    # Get alpha delta
-    achievable_alpha_delta = alpha_delta
-    
-    #alpha_delta = max(achievable_alpha_delta - 0.001, 0)
-    #############################
-    print(
-        f"fingerprint {finger_print} alpha_delta={alpha_delta}"
-    )
-    
+
     keyboard_listener = KeyboardListener()
     keyboard_listener.start_listening()
-    
-    ######################
-    # Main training loop #
-    ######################
+
     try:
-        max_allocative_ratio = -999999999999
+        max_acheived_alpha = 0.0
         start_time = time.time()
-        
+
         allocative_ratios = []
         iterations = []
-        
-        # used to check if training hasn't improved max ratio in last 2 hours
+
         time_of_last_max_improvement = start_time
-        
-        # infinite loop with iter_index starting at 1, breaks on time limit or manual stop
+
         for iter_index in count(start=1):
             iteration_start_time = time.time()
-            
-            # Check stopping conditions
+
             elapsed_time_check = time.time() - start_time
             if elapsed_time_check >= time_limit_seconds:
-                print(
-                    f"Time limit of {time_limit_minutes} minutes reached. Stopping training."
-                )
+                print(f"Time limit of {time_limit_minutes} minutes reached. Stopping training.")
                 break
-            #############################
-            
-            # Check for manual stop
+
             if keyboard_listener.stop_training:
                 print("Training stopped by user input.")
                 break
-            
-            # Train the hypernetwork
-            training_start_time = time.time()
-            # avg_loss = hypernetwork_train(
-            #     hypernetwork,
-            #     target_network,
-            #     optimizer,
-            #     profiles,
-            #     alpha_delta=alpha_delta,
-            #     device=device,
-            #     epochs=500,
-            # )
-            
-            print("Starting",epochs_per_generation,"NEAT generations with",len(worst_case_profiles),"profiles")
-            print("With", len(pop.species.species), "species and",len(pop.population),"individuals")
-            # if iter_index > 1:
-            #     while abs(winner.fitness) < alpha_delta:
-            #         winner = pop.run(lambda genomes, config: eval_genomes(genomes, config, worst_case_profiles, alpha_delta), epochs_per_generation)
-            # else:
-            winner = pop.run(lambda genomes, config: eval_genomes(genomes, config, worst_case_profiles[-BATCH_SIZE:],alpha,alpha_delta,n), epochs_per_generation)
-            #print("NEAT generations complete.")
-            #print(winner)
-            training_duration = time.time() - training_start_time
-            #############################
-            
-            # Running worst case analysis
+
+            print("Starting NEAT generation with", len(worst_case_profiles), "profiles")
+            print("With", len(pop.species.species), "species and", len(pop.population), "individuals")
+
+            # Run NEAT generation; neat_evaluator will call parallel evaluator from main process.
+            winner = pop.run(
+                lambda genomes, 
+                config: neat_evaluator(genomes, config, worst_case_profiles, alpha, alpha_delta, n),
+                1,
+            )
+
+            training_duration = time.time() - iteration_start_time
+
+            if iter_index > 1:
+                update_plot(iterations, allocative_ratios, ax, line)
+                if visualiser is not None:
+                    try:
+                        visualiser.update(winner)
+                    except Exception:
+                        pass
+
             worst_case_start_time = time.time()
-            if True:#winner.fitness > 0:
+            if iter_index % epochs_before_analysis == 1:
                 (
                     wcp_left,
                     wcp_right,
                     error_left,
                     error_right,
                     total_error,
-                ) = Pulp_utils.worst_case_analysis_neat(genome=winner,config=neat_config,alpha_delta=alpha_delta)
-                
-                worst_case_profiles = add_two_profiles(wcp_left, wcp_right, worst_case_profiles)
-            
-            #total_error = winner.fitness
-            current_ratio = winner.wcr
-                
-            worst_case_duration = time.time() - worst_case_start_time
-            #############################
+                ) = Pulp_utils.worst_case_analysis_neat(genome=winner, config=neat_config, alpha_delta=0.0)
 
-            iteration_duration = time.time() - iteration_start_time   
-            ############################# 
-            
-            # Save model 
+                worst_case_profiles = add_two_profiles(wcp_left, wcp_right, worst_case_profiles)
+            else:
+                # If not computing new wcp this iteration, use winner's fitness as proxy
+                pass #total_error = -min(0.0, winner.fitness) if winner.fitness < 0 else 0.0
+
+            current_alpha = max(0.0, winner.fitness)
+
+            worst_case_duration = time.time() - worst_case_start_time
+            iteration_duration = time.time() - iteration_start_time
+
             should_save_model = total_error < min(total_error_history, default=(100, 0))[0]
             if should_save_model:
                 print("💾 New best model found, saving...")
-                save_checkpoint_with_info(pop,pop.generation,worst_case_profiles)
+                save_checkpoint_with_info(pop, pop.generation, worst_case_profiles)
 
             total_error_history.append((total_error, iter_index))
-            #achievable_alpha_delta = min(achievable_alpha_delta, total_error)
 
-            # Adjust alpha_delta based on performance
-            if current_ratio - alpha_delta < 0.001:
-                new_alpha_delta = max(alpha_delta / 2, alpha - 0.01)
-            else:
-                new_alpha_delta = (alpha_delta + achievable_alpha_delta) / 2
-            new_alpha_delta = max(min(new_alpha_delta, achievable_alpha_delta - 0.001), 0)
-            print(f"alpha_delta goes from {alpha_delta} to {new_alpha_delta}")
-            alpha_delta = new_alpha_delta
-            #############################
+            improvement = winner.fitness - best_fitness
+            fitness_updated_mutation = max_mutation_power
+            new_alpha_delta = alpha_delta
             
-            # Calculate elapsed time from the very start
+            #updated_mutation = 0.2 * proposed_mutation + 0.8 * current_mutation
+            print(f"elapsed_time: {elapsed_time_check:.6g}")
+            
+            time_updated_mutation = 1 - (elapsed_time_check / time_limit_seconds)
+            fitness_updated_mutation = min_mutation_power + (max_mutation_power - min_mutation_power) * (1 - winner.fitness/alpha)
+            fitness_updated_mutation = min(fitness_updated_mutation, max_mutation_power)
+            print(f"fitness_updated_mutation: {fitness_updated_mutation:.6g}, time_updated_mutation: {time_updated_mutation:.6g}")
+            updated_mutation = (fitness_updated_mutation + time_updated_mutation)/2 # take the lower of the two
+            updated_mutation = max(min_mutation_power, updated_mutation) # lower bound
+            updated_mutation = min(max_mutation_power, updated_mutation) # upper bound
+            
+            neat_config.genome_config.weight_mutate_power = updated_mutation
+            neat_config.genome_config.bias_mutate_power = updated_mutation
+
             elapsed_time, elapsed_time_str, elapsed_time_underscore = format_elapsed_time(start_time)
             
-            # Check current allocative ratio (total_error) vs max allocative ratio (alpha)
-            # total_error should be the worst-case total_error (smaller is better)
-            #current_ratio = max(0.0, total_error)  # allocative ratio, higher better
+            print(f"alpha_delta = {alpha_delta:.6g}, mutation = {updated_mutation:.6g}")
+            print(f"Current Left-Right error: {error_left:.5f}-{error_right:.5f}")
             print(f"Current total_error: {total_error:.10f}")
-            print(f"allocative_ratio: {current_ratio:.10f}")
+            print(f"Winner worst_alpha: {winner.wca:.10f}")
             print(f"winner_fitness: {winner.fitness:.10f}")
 
-            # MAY NOT BE NEEDED FOR NEAT - Save model if improved
-            # if should_save_model:
-            #     os.makedirs("hypernets", exist_ok=True)
-            #     timestamp = time.strftime("%b_%d_%Hhr_%Mmin_%Ssec")
-            #     hn_filename = f"hypernets/{timestamp}-n{n}-ratio{current_ratio:.8f}-time{elapsed_time_str}-{finger_print}.hn"
-                
-            #     save_data = {
-            #         'hypernetwork_state_dict': hypernetwork.state_dict(),
-            #         'max_allocative_ratio': current_ratio,
-            #         'elapsed_time_seconds': elapsed_time,
-            #         'elapsed_time_formatted': elapsed_time_str,
-            #         'n': n,
-            #         'finger_print': finger_print,
-            #         'target_arch': target_arch,
-            #         'hn_config': hn_config,
-            #         'timestamp': timestamp,
-            #         'iteration': iter_index,
-            #         'total_error': total_error
-            #     }
-                
-            #     torch.save(save_data, hn_filename)
+            if winner.fitness > 0.0 and (alpha - winner.wca) < 1e-4:
+                alpha_delta = alpha_delta / 2
+
+            best_fitness = max(best_fitness, winner.fitness)
             
-            # Update max allocative ratio and time since last improvement
-            if winner.fitness > max_allocative_ratio:
+            if winner.fitness > max_acheived_alpha:
                 time_of_last_max_improvement = time.time()
-                max_allocative_ratio = winner.fitness
-                
-            # Calculate time since last max improvement
+                max_acheived_alpha = winner.fitness
+
             time_since_improvement = time.time() - time_of_last_max_improvement
             hours_since = int(time_since_improvement // 3600)
             minutes_since = int((time_since_improvement % 3600) // 60)
             seconds_since = int(time_since_improvement % 60)
             time_since_str = f"{hours_since:02d}h:{minutes_since:02d}m:{seconds_since:02d}s"
-            #############################
-            
-            # Check if no improvement for more than 2 hours
-            # if time_since_improvement > 20 * 1800:  # 2 hours in seconds
-            #     print(f"⏰ No improvement in max allocative ratio for {time_since_str}. Stopping training.")
-            #     break
-            #############################
-            # Record allocative ratio for plotting
+
             allocative_ratios.append(winner.fitness)
             iterations.append(iter_index)
-            
-            # Print iteration summary
+
             print(
                 "=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+="
-                f"\nIteration {iter_index:03d} summary: "
+                f"\nIteration {iter_index} summary: "
                 f"\nelapsed_time={elapsed_time_str} "
                 f"\ntime_since_max_improvement={time_since_str} "
-                # f"error_left={error_left:.20f} "
-                # f"error_right={error_right:.20f} "
-                f"\nalpha_delta={alpha_delta:.20f} "
-                #f"final_loss={avg_loss:.20f} "
-                f"\nmax_allocative_ratio={max_allocative_ratio:.20f} "
+                f"\nalpha_delta={alpha_delta:.5f} "
+                f"\nbest acheived alpha={max_acheived_alpha:.10f} "
                 f"\ntraining_time={training_duration:.2f}s "
                 f"\nworst_case_time={worst_case_duration:.2f}s "
                 f"\niteration_time={iteration_duration:.2f}s"
+                f"\navg_iteration_time={elapsed_time_check/iter_index:.2f}s"
             )
-            print(f"\nCurrent worst case allocative ratio: {current_ratio}")
-            update_plot(iterations, allocative_ratios, ax, line)
-            
-            # Break if allocative ratio is close to target value
+
+            # target ratio early-exit
             target_ratios = {
                 3: 2 / 3,
                 4: 2 / 3,
@@ -384,139 +391,69 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
                 10: 0.882,
             }
             target_ratio = target_ratios.get(n, None)
-            if abs(current_ratio - target_ratio) < 0.0001:
-                print(f"Allocative ratio {current_ratio:.6f} is within 0.0001 of target {target_ratio:.6f}. Stopping training.")
-                #break
-        
-       
-    
-        return max_allocative_ratio
-    
+            if target_ratio is not None and abs(winner.wca - target_ratio) < 0.0001 and alpha_delta == 0.0:
+                print(f"Allocative ratio is within tolerance of target {target_ratio:.6f}. Stopping training.")
+                break
+
+        return max_acheived_alpha
+
     finally:
         keyboard_listener.cleanup()
 
-# Plot allocative efficiency ratios over iterations
-def update_plot(iterations, ratios, ax, line):
-    # Update line data
-    line.set_xdata(iterations)
-    line.set_ydata(ratios)
 
-    # Rescale axes
-    ax.relim()
-    ax.autoscale_view()
-
-    # Update stats box
-    max_ratio = max(ratios)
-    stats_text = f"Iterations: {len(iterations)}\nMax: {max_ratio:.6f}\nFinal: {ratios[-1]:.6f}"
-
-    # Clear old text and redraw
-    [t.remove() for t in ax.texts]
-    ax.text(
-        0.02, 0.98, stats_text,
-        transform=ax.transAxes,
-        verticalalignment="top",
-        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8)
-    )
-
-    plt.pause(0.01)  # refresh the figure
-
-
-def evaluate_saved_model(saved_filename):
-    """Load a saved model and run MIP analysis on it"""
-
-    # Load the saved model
-    model_path = f"models/{saved_filename}"
-    target_network = torch.load(model_path, map_location=device, weights_only=False)
-    
-    functional_state_dict = target_network.state_dict()
-    print("\n=== FunctionalR Parameters ===")
-    for param_name, param_tensor in functional_state_dict.items():
-        print(f"\nParameter: {param_name}")
-        print(f"Shape: {param_tensor.shape}")
-        print(f"Device: {param_tensor.device}")
-        print(f"Dtype: {param_tensor.dtype}")
-        print(f"Values:\n{param_tensor}")
-        print(f"Min: {param_tensor.min().item()}, Max: {param_tensor.max().item()}")
-        print("-" * 50)
-
-    print(f"Loaded model: {saved_filename}")
-    print(f"Model's achievable_alpha_delta: {target_network.achievable_alpha_delta}")
-
-    # Run MIP analysis
-    alpha_delta = 0
-
-    print(f"Running MIP analysis with alpha_delta={alpha_delta}")
-
-    (
-        wcp_left,
-        wcp_right,
-        error_left,
-        error_right,
-        total_error,
-    ) = target_network.worst_case_analysis(alpha_delta=alpha_delta)
-
-    current_ratio = alpha - total_error
-
-    print(f"Results:")
-    print(f"  Worst case profile left: {wcp_left}")
-    print(f"  Worst case profile right: {wcp_right}")
-    print(f"  Error left: {error_left:.20f}")
-    print(f"  Error right: {error_right:.20f}")
-    print(f"  Total error: {total_error:.20f}")
-    print(f"  Current allocative ratio: {current_ratio:.20f}")
-
-    return current_ratio
-
+# Keyboard listener
 class KeyboardListener:
     def __init__(self):
         self.stop_training = False
         self.listening = False
 
     def start_listening(self):
-        """Start listening for keyboard input in a separate thread."""
         self.listening = True
 
         def listen():
             while not self.stop_training and self.listening:
-                if msvcrt.kbhit():  # check if a key was pressed
+                if msvcrt.kbhit():
                     char = msvcrt.getch().decode("utf-8", errors="ignore")
                     if char.lower() == "i":
                         print("\n🛑 Manual stop requested by pressing 'i'")
                         self.stop_training = True
                         break
-                time.sleep(0.1)  # small sleep to avoid busy waiting
+                time.sleep(0.1)
 
         thread = threading.Thread(target=listen, daemon=True)
         thread.start()
 
     def cleanup(self):
-        """Stop listening (no terminal settings to restore on Windows)."""
         self.listening = False
-            
-# Jul_31_15hr_40min_37sec-5-3-0-2-03995-0.00005244780750190969.saved
-# evaluate_saved_model("Jun_09_15hr_50min_08sec-5-3-0-2-07466-0.00000751132112641884.saved")         
-# evaluate_saved_model("Jul_31_15hr_40min_37sec-5-3-0-2-03995-0.00005244780750190969.saved")             
 
-# run training from scratch or resume from a checkpoint
-if resume:
-    pop,gen,wcp = load_checkpoint_with_info()
-    run_training(time_limit*60, epochs_before_analysis, init_alpha_delta, pop, wcp)
-else:
-    run_training(time_limit*60, epochs_before_analysis, init_alpha_delta)
 
-"""
-Order of execution:
-1. calls hypernetwork()
-2. run_hypernetwork_with_architecture() to get max_ratio
-3. hypernetwork_train()
-4. plot_allocative_ratios()
-5. evaluate_saved_model()
+# -------------------------
+# NEAT config
+# -------------------------
+config_path = "neat_config.ini"
+neat_config = neat.Config(
+    neat.DefaultGenome,
+    neat.DefaultReproduction,
+    neat.DefaultSpeciesSet,
+    neat.DefaultStagnation,
+    config_path,
+)
 
-NEEDS TO BE
+neat_config.reproduction_type = FullyConnectedToOutputReproduction
 
-1. init neat
-2. test on victor profiles
-3. worst-case analysis via mip
-4. repopulate
-5. repeat
-"""
+
+# Entrypoint: ensure safe multiprocessing on Windows
+if __name__ == "__main__":
+    from multiprocessing import freeze_support, set_start_method
+
+    freeze_support()
+    try:
+        set_start_method("spawn")
+    except RuntimeError:
+        pass
+
+    if resume:
+        pop, gen, wcp = load_checkpoint_with_info()
+        run_training(time_limit * 60, epochs_before_analysis, init_alpha_delta, pop, wcp)
+    else:
+        run_training(time_limit * 60, epochs_before_analysis, init_alpha_delta)

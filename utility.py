@@ -1,6 +1,7 @@
 from random import random
 from settings import n as n_agents
 import numpy as np
+import tkinter as tk
 
 # Victor's conjectured upperbound: only kept 3 significant digits
 victor = {
@@ -131,6 +132,8 @@ def get_random_profiles(count, guided=True):
             return random()
 
     return [list(sorted(get_random_bid() for _ in range(n_agents))) for _ in range(count)]
+
+# Genome visualization
 
 # NOT USED, NOT SURE WHAT IT DID
 def loss_schedule(train_count):
