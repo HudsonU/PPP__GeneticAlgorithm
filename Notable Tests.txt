@@ -1,0 +1,14 @@
+achieved 0.653 on the 3 agent case with a final AD = 0.1 with pop=100
+above result no reproducable consistently on different seeds
+
+increasing pop size t0 250 did nothing noticable over another 12 hour run 
+finished with 0.630 and alpha delta 0.1
+
+trying with alpha_delta = 0.01 to see if this affects ability to get good network
+keeping pop at 100, was unable to acheive a groves' function, final fitness = -0.0475 (error).
+
+setting init_alpha_delta back to 0.1 and changing the way that alpha_delta is decreased: 
+it used to decrease when achieved_alpha ~ alpha, but it will now decrease when 
+it gets a viable groves function.
+
+didnt do anything, from now ill just keep it as is, making init hidden nodes =5 for n=3

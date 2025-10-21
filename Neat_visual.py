@@ -51,7 +51,7 @@ def feed_forward_layout(genome, config):
     input_nodes = [i for i in range(-config.genome_config.num_inputs, 0)]
     output_nodes = list(range(config.genome_config.num_outputs))
 
-    # Add all nodes to graph
+    # Add nodes and edges
     for n in genome.nodes:
         G.add_node(n)
     for (i, o), conn in genome.connections.items():
@@ -66,17 +66,25 @@ def feed_forward_layout(genome, config):
     for n, d in depths.items():
         layers.setdefault(d, []).append(n)
 
-    # Assign positions
+    # Assign positions: staggered horizontally, centered vertically
     pos = {}
     for depth in sorted(layers.keys()):
         nodes = layers[depth]
-        for i, n in enumerate(nodes):
-            pos[n] = (depth, -i)  # depth = x, vertical stack = y
+        num_nodes = len(nodes)
+        horizontal_spread = 0.3 * num_nodes  # tweak this for spacing
 
-    # Handle any nodes that were not reachable / assigned a depth
+        # Compute vertical positions centered around 0
+        y_start = (num_nodes - 1) / 2
+        for i, n in enumerate(nodes):
+            y = y_start - i               # center vertically
+            x_offset = ((i - num_nodes / 2) / num_nodes) * horizontal_spread
+            x = depth
+            pos[n] = (x, y)
+
+    # Handle unreachable nodes
     free_nodes = [n for n in G.nodes if n not in pos]
     if free_nodes:
-        min_depth = min(pos.keys()) if pos else 0
+        min_depth = min(depths.values(), default=0)
         free_y = -len(pos) - 1
         for i, n in enumerate(free_nodes):
             pos[n] = (min_depth - 1, free_y - i)

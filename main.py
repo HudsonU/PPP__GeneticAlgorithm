@@ -75,9 +75,7 @@ def load_checkpoint_with_info(filename="checkpoint_full.pkl"):
 # -------------------------
 # Evaluation helpers
 # -------------------------
-def eval_single_genome(
-    genome_id, genome, config, worst_case_profiles, alpha, alpha_delta, n, tol=1e-4
-):
+def eval_single_genome(genome_id, genome, config, worst_case_profiles, alpha, alpha_delta, n, tol=1e-4):
     """
     Evaluate a single genome. Returns (genome_id, fitness, wca, infeasible_flag, max_violation).
     """
@@ -127,8 +125,6 @@ def eval_single_genome(
 
     return (genome_id, fitness, worst_alpha, infeasible, max_violation)
 
-
-# Top-level worker that is picklable by ProcessPoolExecutor
 def eval_genome_task(pair, config, worst_case_profiles, alpha, alpha_delta, n):
     """
     pair: (genome_id, genome)
@@ -137,10 +133,7 @@ def eval_genome_task(pair, config, worst_case_profiles, alpha, alpha_delta, n):
     gid, genome = pair
     return eval_single_genome(gid, genome, config, worst_case_profiles, alpha, alpha_delta, n)
 
-
-def eval_genomes_in_parallel(
-    genome_pairs, config, worst_case_profiles, alpha, alpha_delta, n, max_workers, chunksize
-):
+def eval_genomes_in_parallel(genome_pairs, config, worst_case_profiles, alpha, alpha_delta, n, max_workers, chunksize):
     """
     Evaluates genomes in parallel using ProcessPoolExecutor.
     Writes fitness/wca back into genome objects in parent process after collecting results.
@@ -174,7 +167,6 @@ def eval_genomes_in_parallel(
 
     return
 
-
 def neat_evaluator(genomes, config, profiles, alpha, alpha_delta, n):
     # Choose number of workers; limit to a reasonable number for your machine
     max_workers = min(os.cpu_count() or 1, 16)
@@ -188,7 +180,6 @@ def neat_evaluator(genomes, config, profiles, alpha, alpha_delta, n):
         max_workers=max_workers,
         chunksize=8,
     )
-
 
 # Plot update; import matplotlib locally so module import-time won't touch GUI
 def update_plot(iterations, ratios, ax, line):
@@ -322,18 +313,17 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
 
             total_error_history.append((total_error, iter_index))
 
-            improvement = winner.fitness - best_fitness
-            fitness_updated_mutation = max_mutation_power
+            #improvement = winner.fitness - best_fitness
             new_alpha_delta = alpha_delta
             
             #updated_mutation = 0.2 * proposed_mutation + 0.8 * current_mutation
-            print(f"elapsed_time: {elapsed_time_check:.6g}")
+            #print(f"elapsed_time: {elapsed_time_check:.6g}")
             
-            time_updated_mutation = 1 - (elapsed_time_check / time_limit_seconds)
-            fitness_updated_mutation = min_mutation_power + (max_mutation_power - min_mutation_power) * (1 - winner.fitness/alpha)
-            fitness_updated_mutation = min(fitness_updated_mutation, max_mutation_power)
+            time_updated_mutation = min_mutation_power + (1 - elapsed_time_check / time_limit_seconds) * (max_mutation_power - min_mutation_power)
+            fitness_updated_mutation = min_mutation_power + (max_mutation_power - min_mutation_power) * abs(winner.fitness)
+            
             print(f"fitness_updated_mutation: {fitness_updated_mutation:.6g}, time_updated_mutation: {time_updated_mutation:.6g}")
-            updated_mutation = (fitness_updated_mutation + time_updated_mutation)/2 # take the lower of the two
+            updated_mutation = (fitness_updated_mutation + time_updated_mutation)/2 # take the average of the two
             updated_mutation = max(min_mutation_power, updated_mutation) # lower bound
             updated_mutation = min(max_mutation_power, updated_mutation) # upper bound
             
@@ -343,13 +333,13 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
             elapsed_time, elapsed_time_str, elapsed_time_underscore = format_elapsed_time(start_time)
             
             print(f"alpha_delta = {alpha_delta:.6g}, mutation = {updated_mutation:.6g}")
-            print(f"Current Left-Right error: {error_left:.5f}-{error_right:.5f}")
+            print(f"Current Left-Right error: {error_left:.5f} ~~~ {error_right:.5f}")
             print(f"Current total_error: {total_error:.10f}")
             print(f"Winner worst_alpha: {winner.wca:.10f}")
             print(f"winner_fitness: {winner.fitness:.10f}")
 
-            if winner.fitness > 0.0 and (alpha - winner.wca) < 1e-4:
-                alpha_delta = alpha_delta / 2
+            if winner.fitness > 0.0:
+                alpha_delta = alpha_delta * 0.95
 
             best_fitness = max(best_fitness, winner.fitness)
             
@@ -391,7 +381,7 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
                 10: 0.882,
             }
             target_ratio = target_ratios.get(n, None)
-            if target_ratio is not None and abs(winner.wca - target_ratio) < 0.0001 and alpha_delta == 0.0:
+            if target_ratio is not None and abs(winner.fitness - target_ratio) < 0.0001 and alpha_delta == 0.0:
                 print(f"Allocative ratio is within tolerance of target {target_ratio:.6f}. Stopping training.")
                 break
 
