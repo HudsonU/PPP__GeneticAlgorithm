@@ -43,6 +43,22 @@ class NetVisualiser:
         )
         self.canvas.draw()
 
+    def save_png(self, filename: str, dpi: int = 150, transparent: bool = False):
+        """
+        Save the current figure to a PNG file.
+        Call this after update() (or it will call canvas.draw() itself to ensure up-to-date).
+        """
+        # make sure the canvas is drawn (so image matches the Tk view)
+        try:
+            self.canvas.draw()
+        except Exception:
+            # fallback: force a draw via figure.canvas
+            self.fig.canvas.draw()
+
+        # save the figure
+        self.fig.savefig(filename, dpi=dpi, bbox_inches="tight", transparent=transparent)
+        print(f"Saved network image to: {filename}")
+
 
 def feed_forward_layout(genome, config):
     G = nx.DiGraph()
@@ -126,3 +142,5 @@ def compute_node_depths(genome, input_nodes, output_nodes):
             depths[n] = max_depth + 1
 
     return depths
+
+

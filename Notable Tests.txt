@@ -11,4 +11,10 @@ setting init_alpha_delta back to 0.1 and changing the way that alpha_delta is de
 it used to decrease when achieved_alpha ~ alpha, but it will now decrease when 
 it gets a viable groves function.
 
-didnt do anything, from now ill just keep it as is, making init hidden nodes =5 for n=3
+I rewrote the multiprocessing more optimised by moving initialisation outside of the pnr-worker code.
+
+I have now noticed that increasing the populatin size to 10000 (100x) only increases the iteration time by 3x-4x
+so this should be making evolution much faster. This causes the time to increase a lot for the first ~100 iterations
+before the stagnation can kick in (50 iteration stagnation protection)
+
+Due to the above, i am now performing worst case analysis every iteration.

@@ -9,7 +9,7 @@ from concurrent.futures import ProcessPoolExecutor
 import pickle
 from functools import partial
 import threading
-
+from Neat_evaluation import neat_evaluator as optimized_neat_evaluator
 import Pulp_utils
 from NEAT_Reproduction import FullyConnectedToOutputReproduction
 from settings import (
@@ -23,6 +23,7 @@ from settings import (
     min_mutation_power,
     max_mutation_power,
     dynamic_mutation,
+    saves_per_run
 )
 from utility import (
     alpha,
@@ -55,14 +56,12 @@ def format_elapsed_time(start_time):
         f"{elapsed_hours:02d}h_{elapsed_minutes:02d}m_{elapsed_seconds:02d}s",
     )
 
-
 # save / load checkpoint utilities (unchanged)
 def save_checkpoint_with_info(population, generation, wcps, filename="checkpoint_full.pkl"):
     checkpoint_data = {"population": population, "generation": generation, "wcps": wcps}
     with open(filename, "wb") as f:
         pickle.dump(checkpoint_data, f)
     print(f"Checkpoint saved: {filename}")
-
 
 def load_checkpoint_with_info(filename="checkpoint_full.pkl"):
     with open(filename, "rb") as f:
@@ -71,119 +70,12 @@ def load_checkpoint_with_info(filename="checkpoint_full.pkl"):
         raise ValueError(f"Checkpoint file {filename} is missing required keys.")
     return checkpoint_data["population"], checkpoint_data["generation"], checkpoint_data["wcps"]
 
-
-# -------------------------
-# Evaluation helpers
-# -------------------------
-def eval_single_genome(genome_id, genome, config, worst_case_profiles, alpha, alpha_delta, n, tol=1e-4):
-    """
-    Evaluate a single genome. Returns (genome_id, fitness, wca, infeasible_flag, max_violation).
-    """
-    net = neat.nn.FeedForwardNetwork.create(genome, config)
-    infeasible = False
-    worst_alpha = alpha
-    max_violation = 0.0
-    alpha_use = alpha - alpha_delta
-
-    profiles = np.asarray(worst_case_profiles, dtype=float)
-    m = profiles.shape[0]
-    if m == 0:
-        raise ValueError("worst_case_profiles is empty")
-
-    for theta in profiles:
-        if len(theta) != n:
-            raise ValueError(f"profile length {len(theta)} != expected {n}")
-
-        s_theta = max(np.sum(theta), 1.0)
-
-        # compute S = sum_i net(theta_minus_i)
-        S = 0.0
-        for i in range(n):
-            theta_minus_i = np.concatenate([theta[:i], theta[i + 1 :]])
-            h_val = float(net.activate(list(theta_minus_i))[0])
-            S += h_val
-
-        left_error = (n - 1) * s_theta - S
-        right_error = S - (n - (alpha_use)) * s_theta
-        total_error = max(0.0, left_error) + max(0.0, right_error)
-
-        if total_error > max_violation:
-            max_violation = total_error
-
-        if total_error > tol:
-            infeasible = True
-            continue
-
-        achieved_alpha = n - S / s_theta
-        if achieved_alpha < worst_alpha:
-            worst_alpha = achieved_alpha
-
-    if infeasible:
-        fitness = -max_violation
-    else:
-        fitness = max(0.0, worst_alpha)
-
-    return (genome_id, fitness, worst_alpha, infeasible, max_violation)
-
-def eval_genome_task(pair, config, worst_case_profiles, alpha, alpha_delta, n):
-    """
-    pair: (genome_id, genome)
-    This wrapper is module-level (not nested) so it can be pickled on spawn.
-    """
-    gid, genome = pair
-    return eval_single_genome(gid, genome, config, worst_case_profiles, alpha, alpha_delta, n)
-
-def eval_genomes_in_parallel(genome_pairs, config, worst_case_profiles, alpha, alpha_delta, n, max_workers, chunksize):
-    """
-    Evaluates genomes in parallel using ProcessPoolExecutor.
-    Writes fitness/wca back into genome objects in parent process after collecting results.
-    """
-    worst_case_profiles = np.asarray(worst_case_profiles, dtype=float)
-
-    # Partial bind constants; eval_genome_task accepts (pair, config, worst_case_profiles, alpha,...)
-    worker = partial(
-        eval_genome_task,
-        config=config,
-        worst_case_profiles=worst_case_profiles,
-        alpha=alpha,
-        alpha_delta=alpha_delta,
-        n=n,
-    )
-
-    tasks = [(gid, genome) for (gid, genome) in genome_pairs]
-
-    results = []
-    with ProcessPoolExecutor(max_workers=max_workers) as exe:
-        # map picks each item from `tasks` and passes it as the first (pair) argument to `worker`.
-        for res in exe.map(worker, tasks, chunksize=chunksize):
-            results.append(res)
-
-    # write results back into genome objects (parent process)
-    id_to_genome = {gid: g for (gid, g) in genome_pairs}
-    for gid, fitness, worst_alpha, infeasible, max_violation in results:
-        genome_obj = id_to_genome[gid]
-        genome_obj.fitness = fitness
-        genome_obj.wca = worst_alpha
-
-    return
-
-def neat_evaluator(genomes, config, profiles, alpha, alpha_delta, n):
-    # Choose number of workers; limit to a reasonable number for your machine
-    max_workers = min(os.cpu_count() or 1, 16)
-    eval_genomes_in_parallel(
-        list(genomes),
-        config,
-        profiles,
-        alpha,
-        alpha_delta,
-        n,
-        max_workers=max_workers,
-        chunksize=8,
-    )
-
 # Plot update; import matplotlib locally so module import-time won't touch GUI
-def update_plot(iterations, ratios, ax, line):
+def update_plot(iterations, ratios, ax, line, save_path: str | None = None, dpi: int = 150, transparent: bool = False):
     import matplotlib.pyplot as plt
+
+    if len(iterations) == 0 or len(ratios) == 0:
+        return
 
     line.set_xdata(iterations)
     line.set_ydata(ratios)
@@ -191,7 +83,14 @@ def update_plot(iterations, ratios, ax, line):
     ax.autoscale_view()
     max_ratio = max(ratios)
     stats_text = f"Iterations: {len(iterations)}\nMax: {max_ratio:.6f}\nFinal: {ratios[-1]:.6f}"
-    [t.remove() for t in ax.texts]
+
+    # remove previous text objects safely
+    for t in list(ax.texts):
+        try:
+            t.remove()
+        except Exception:
+            pass
+
     ax.text(
         0.02,
         0.98,
@@ -200,8 +99,23 @@ def update_plot(iterations, ratios, ax, line):
         verticalalignment="top",
         bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
     )
+
+    # draw to update the GUI
     plt.pause(0.01)
 
+    # save if requested
+    if save_path:
+        # ensure extension
+        if not save_path.lower().endswith(".png"):
+            save_path = save_path + ".png"
+        try:
+            fig = ax.figure
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight", transparent=transparent)
+            print(f"Saved fitness plot to: {save_path}")
+        except Exception as e:
+            print(f"Warning: failed to save fitness plot to {save_path}: {e}")
+
+# Neat evaluator wrapper to use optimized evaluator
 
 # Main training loop. Note: NetVisualiser / matplotlib created here in main process only.
 def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, population=None, wcp=None):
@@ -246,13 +160,21 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
     keyboard_listener.start_listening()
 
     try:
-        max_acheived_alpha = 0.0
+        max_acheived_fitness = -100
         start_time = time.time()
 
         allocative_ratios = []
         iterations = []
 
         time_of_last_max_improvement = start_time
+        
+        # time-based snapshots (simple)
+        interval = time_limit_seconds / max(1, saves_per_run)
+        next_save_time = interval
+        saves_done = 0
+        min_gens_between_saves = 1
+        last_save_iter = -min_gens_between_saves
+
 
         for iter_index in count(start=1):
             iteration_start_time = time.time()
@@ -260,19 +182,36 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
             elapsed_time_check = time.time() - start_time
             if elapsed_time_check >= time_limit_seconds:
                 print(f"Time limit of {time_limit_minutes} minutes reached. Stopping training.")
+                fname = f"{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png"
+                update_plot(iterations, allocative_ratios, ax, line, save_path=f"p_{fname}")
+                visualiser.save_png(f"n_{fname}", dpi=150, transparent=True)
                 break
 
             if keyboard_listener.stop_training:
                 print("Training stopped by user input.")
+                fname = f"{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png"
+                update_plot(iterations, allocative_ratios, ax, line, save_path=f"p_{fname}")
+                visualiser.save_png(f"n_{fname}", dpi=150, transparent=True)
                 break
 
             print("Starting NEAT generation with", len(worst_case_profiles), "profiles")
             print("With", len(pop.species.species), "species and", len(pop.population), "individuals")
 
             # Run NEAT generation; neat_evaluator will call parallel evaluator from main process.
+            max_workers = min(os.cpu_count() or 1, 16)
+
             winner = pop.run(
-                lambda genomes, 
-                config: neat_evaluator(genomes, config, worst_case_profiles, alpha, alpha_delta, n),
+                lambda genomes, config: optimized_neat_evaluator(
+                    genomes=genomes,
+                    config=config,
+                    worst_case_profiles=worst_case_profiles,  # same variable you already use
+                    alpha=alpha,
+                    alpha_delta=alpha_delta,
+                    n=n,
+                    max_workers=max_workers,
+                    batch_size=BATCH_SIZE,
+                    tol=1e-4,
+                ),
                 1,
             )
 
@@ -287,7 +226,7 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
                         pass
 
             worst_case_start_time = time.time()
-            if iter_index % epochs_before_analysis == 1:
+            if iter_index % epochs_before_analysis == 1 or epochs_before_analysis == 1:
                 (
                     wcp_left,
                     wcp_right,
@@ -308,7 +247,6 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
 
             should_save_model = total_error < min(total_error_history, default=(100, 0))[0]
             if should_save_model:
-                print("💾 New best model found, saving...")
                 save_checkpoint_with_info(pop, pop.generation, worst_case_profiles)
 
             total_error_history.append((total_error, iter_index))
@@ -338,14 +276,25 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
             print(f"Winner worst_alpha: {winner.wca:.10f}")
             print(f"winner_fitness: {winner.fitness:.10f}")
 
+            if visualiser is not None and saves_done < saves_per_run:
+                # elapsed_time_check is already computed as time.time() - start_time
+                if elapsed_time_check >= next_save_time:
+                    fname = f"{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png"
+                    #update_plot(iterations, allocative_ratios, ax, line, save_path=f"p_{fname}")
+                    visualiser.save_png(f"n_{fname}", dpi=150, transparent=True)
+                    saves_done += 1
+                    last_save_iter = iter_index
+                    next_save_time += interval
+
+
             if winner.fitness > 0.0:
                 alpha_delta = alpha_delta * 0.95
 
             best_fitness = max(best_fitness, winner.fitness)
             
-            if winner.fitness > max_acheived_alpha:
+            if winner.fitness > max_acheived_fitness:
                 time_of_last_max_improvement = time.time()
-                max_acheived_alpha = winner.fitness
+                max_acheived_fitness = winner.fitness
 
             time_since_improvement = time.time() - time_of_last_max_improvement
             hours_since = int(time_since_improvement // 3600)
@@ -362,7 +311,7 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
                 f"\nelapsed_time={elapsed_time_str} "
                 f"\ntime_since_max_improvement={time_since_str} "
                 f"\nalpha_delta={alpha_delta:.5f} "
-                f"\nbest acheived alpha={max_acheived_alpha:.10f} "
+                f"\nbest acheived alpha={max_acheived_fitness:.10f} "
                 f"\ntraining_time={training_duration:.2f}s "
                 f"\nworst_case_time={worst_case_duration:.2f}s "
                 f"\niteration_time={iteration_duration:.2f}s"
@@ -383,9 +332,12 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
             target_ratio = target_ratios.get(n, None)
             if target_ratio is not None and abs(winner.fitness - target_ratio) < 0.0001 and alpha_delta == 0.0:
                 print(f"Allocative ratio is within tolerance of target {target_ratio:.6f}. Stopping training.")
+                fname = f"{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png"
+                update_plot(iterations, allocative_ratios, ax, line, save_path=f"p_{fname}")
+                visualiser.save_png(f"n_{fname}", dpi=150, transparent=True)
                 break
 
-        return max_acheived_alpha
+        return max_acheived_fitness
 
     finally:
         keyboard_listener.cleanup()

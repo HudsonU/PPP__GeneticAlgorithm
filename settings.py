@@ -30,7 +30,10 @@ resume = False
 
 # number of generations to train before saving a model
 # and adding the worst case profile to the list
-epochs_before_analysis = 10
+epochs_before_analysis = 1
+
+# how many saves to make per run (save every time_limit/spr hours)
+saves_per_run = 1000
 
 # NOT USED network configuration, refers to hidden layers and nodes
 min_layers = 1
