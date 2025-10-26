@@ -95,7 +95,7 @@ def vectorized_kick_batch(profiles):
 ##################################################
 
 # called by add_two_profiles, chechs if new_p is sufficiently different from existing profiles
-def add_profile(new_p, profiles, minDif=1e-6):
+def add_profile(new_p, profiles, minDif=1e-12):
     new_p = np.array(new_p, dtype=float)
     if len(profiles) == 0:
         return [new_p]
@@ -162,3 +162,38 @@ def loss_schedule(train_count):
         else:
             res += 0.1024
     return res
+
+# function to save the true fitness values to a CSV file
+import csv
+import numpy as np
+
+def save_array_to_csv(array, filename, headers=None):
+    """
+    Save a 1D or 2D Python list or numpy array as a CSV file.
+
+    Args:
+        array: list, list of lists, or numpy array (1D or 2D).
+        filename: output file name ('.csv' is automatically added if missing).
+        headers: optional list of column headers.
+    """
+    # Ensure .csv extension
+    if not filename.lower().endswith(".csv"):
+        filename += ".csv"
+
+    # Convert to numpy array for shape handling
+    arr = np.asarray(array)
+
+    # Make sure it’s 2D
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    elif arr.ndim > 2:
+        raise ValueError("Array must be 1D or 2D")
+
+    # Write CSV
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if headers is not None:
+            writer.writerow(headers)
+        writer.writerows(arr)
+
+    print(f"Saved history data to {filename}")

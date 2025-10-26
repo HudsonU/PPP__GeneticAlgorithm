@@ -131,13 +131,12 @@ def _evaluate_single_genome_worker(pair: Tuple[int, Any]) -> Tuple[int, float, f
         if total_error > tol:
             infeasible = True
             # continue to compute max_violation across profiles
-            continue
 
         achieved_alpha = N - S / s_theta
         if achieved_alpha < worst_alpha:
             worst_alpha = achieved_alpha
 
-    fitness = -max_violation if infeasible else max(0.0, worst_alpha)
+    fitness = worst_alpha - max_violation
     return (gid, fitness, worst_alpha, infeasible, max_violation)
 
 

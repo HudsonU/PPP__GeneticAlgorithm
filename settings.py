@@ -16,14 +16,14 @@ BATCH_SIZE = 256
 # dynamic mutation settings
 dynamic_mutation = True
 min_mutation_power = 0.01
-max_mutation_power = 0.1
+max_mutation_power = 1.0
 mutation_adjustment = 0.1  # NOT USED: how much to change mutation rate by (cur*(1 +/- mutation_adjustment))
 
 # intial slack on alpha for mip and fitness
 init_alpha_delta = 0.0
 
 # seed for the environment, used to ensure reproducibility
-env_seed = 32234332
+env_seed = 322343321
 
 # continue training from a previous run
 resume = False
@@ -33,7 +33,7 @@ resume = False
 epochs_before_analysis = 1
 
 # how many saves to make per run (save every time_limit/spr hours)
-saves_per_run = 1000
+saves_per_run = 100
 
 # NOT USED network configuration, refers to hidden layers and nodes
 min_layers = 1

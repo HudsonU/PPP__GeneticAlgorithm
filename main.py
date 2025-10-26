@@ -35,6 +35,7 @@ from utility import (
     vectorized_kick_batch,
     add_two_profiles,
     get_random_profiles,
+    save_array_to_csv,
 )
 
 
@@ -163,12 +164,13 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
         max_acheived_fitness = -100
         start_time = time.time()
 
-        allocative_ratios = []
+        winner_fitness_history = []
+        winner_wca_history = []
         iterations = []
 
         time_of_last_max_improvement = start_time
         
-        # time-based snapshots (simple)
+        # set up saving intervals
         interval = time_limit_seconds / max(1, saves_per_run)
         next_save_time = interval
         saves_done = 0
@@ -180,18 +182,11 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
             iteration_start_time = time.time()
 
             elapsed_time_check = time.time() - start_time
-            if elapsed_time_check >= time_limit_seconds:
-                print(f"Time limit of {time_limit_minutes} minutes reached. Stopping training.")
-                fname = f"{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png"
-                update_plot(iterations, allocative_ratios, ax, line, save_path=f"p_{fname}")
-                visualiser.save_png(f"n_{fname}", dpi=150, transparent=True)
-                break
-
-            if keyboard_listener.stop_training:
-                print("Training stopped by user input.")
-                fname = f"{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png"
-                update_plot(iterations, allocative_ratios, ax, line, save_path=f"p_{fname}")
-                visualiser.save_png(f"n_{fname}", dpi=150, transparent=True)
+            if elapsed_time_check >= time_limit_seconds or keyboard_listener.stop_training:
+                update_plot(iterations, winner_fitness_history, ax, line, save_path=f"saves/p_{n}a_fit{winner.fitness:.6f}.png")
+                visualiser.save_png(f"saves/n_{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png", dpi=150, transparent=True)
+                save_array_to_csv(np.array(list(zip(winner_fitness_history, winner_wca_history))), f"saves/f_{n}a_fit{winner.fitness:.6f}.csv")
+                save_checkpoint_with_info(pop, pop.generation, worst_case_profiles)
                 break
 
             print("Starting NEAT generation with", len(worst_case_profiles), "profiles")
@@ -218,7 +213,7 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
             training_duration = time.time() - iteration_start_time
 
             if iter_index > 1:
-                update_plot(iterations, allocative_ratios, ax, line)
+                update_plot(iterations, winner_fitness_history, ax, line)
                 if visualiser is not None:
                     try:
                         visualiser.update(winner)
@@ -243,11 +238,7 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
             current_alpha = max(0.0, winner.fitness)
 
             worst_case_duration = time.time() - worst_case_start_time
-            iteration_duration = time.time() - iteration_start_time
-
-            should_save_model = total_error < min(total_error_history, default=(100, 0))[0]
-            if should_save_model:
-                save_checkpoint_with_info(pop, pop.generation, worst_case_profiles)
+            iteration_duration = time.time() - iteration_start_time                
 
             total_error_history.append((total_error, iter_index))
 
@@ -279,9 +270,8 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
             if visualiser is not None and saves_done < saves_per_run:
                 # elapsed_time_check is already computed as time.time() - start_time
                 if elapsed_time_check >= next_save_time:
-                    fname = f"{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png"
-                    #update_plot(iterations, allocative_ratios, ax, line, save_path=f"p_{fname}")
-                    visualiser.save_png(f"n_{fname}", dpi=150, transparent=True)
+                    save_checkpoint_with_info(pop, pop.generation, worst_case_profiles)
+                    visualiser.save_png(f"saves/n_{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png", dpi=150, transparent=True)
                     saves_done += 1
                     last_save_iter = iter_index
                     next_save_time += interval
@@ -302,7 +292,8 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
             seconds_since = int(time_since_improvement % 60)
             time_since_str = f"{hours_since:02d}h:{minutes_since:02d}m:{seconds_since:02d}s"
 
-            allocative_ratios.append(winner.fitness)
+            winner_fitness_history.append(winner.fitness)
+            winner_wca_history.append(winner.wca)
             iterations.append(iter_index)
 
             print(
@@ -332,9 +323,10 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
             target_ratio = target_ratios.get(n, None)
             if target_ratio is not None and abs(winner.fitness - target_ratio) < 0.0001 and alpha_delta == 0.0:
                 print(f"Allocative ratio is within tolerance of target {target_ratio:.6f}. Stopping training.")
-                fname = f"{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png"
-                update_plot(iterations, allocative_ratios, ax, line, save_path=f"p_{fname}")
-                visualiser.save_png(f"n_{fname}", dpi=150, transparent=True)
+                update_plot(iterations, winner_fitness_history, ax, line, save_path=f"saves/p_{n}a_fit{winner.fitness:.6f}.png")
+                visualiser.save_png(f"saves/n_{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png", dpi=150, transparent=True)
+                save_array_to_csv(np.array(list(zip(winner_fitness_history, winner_wca_history))), f"saves/f_{n}a_fit{winner.fitness:.6f}.csv")
+                save_checkpoint_with_info(pop, pop.generation, worst_case_profiles)
                 break
 
         return max_acheived_fitness
