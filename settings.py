@@ -11,7 +11,7 @@ n = 3
 time_limit = 12
 
 # number of worst case profiles to keep in memory
-BATCH_SIZE = 256
+BATCH_SIZE = 10000
 
 # dynamic mutation settings
 dynamic_mutation = True

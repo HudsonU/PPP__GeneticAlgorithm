@@ -23,8 +23,7 @@ from math import isfinite
 # Call worst_case_analysis_neat(genome, config, alpha_delta=0, input_bounds=(0,1))
 
 
-def compute_big_m(genome, config, input_bounds=(0.0, 1.0), scale=1.0, max_iters=int(1e4),
-                  debug=False):
+def compute_big_m(genome, config, input_bounds=(0.0, 1.0), scale=1.0, max_iters=int(1e4), debug=False):
     """
     Robust interval propagation for NEAT genomes (ReLU). Improvements vs. naive:
       - detect SCCs and apply damped updates to nodes in strongly-coupled components
@@ -171,7 +170,9 @@ def compute_big_m(genome, config, input_bounds=(0.0, 1.0), scale=1.0, max_iters=
                 changed = True
 
         if not changed:
-            break
+            continue
+            #break
+            
 
     # --- AFTER propagation: orphan detection & final normalization ---
     orphan_nodes = set()

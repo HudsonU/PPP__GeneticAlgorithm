@@ -18,3 +18,6 @@ so this should be making evolution much faster. This causes the time to increase
 before the stagnation can kick in (50 iteration stagnation protection)
 
 Due to the above, i am now performing worst case analysis every iteration.
+
+ive implemented gpu passes to compute agaist all profiles at once, this also lets me use more profiles to
+converge faster, since this now (mostly) avoids the whach-a-mole situation from before

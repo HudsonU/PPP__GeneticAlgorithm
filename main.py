@@ -9,7 +9,7 @@ from concurrent.futures import ProcessPoolExecutor
 import pickle
 from functools import partial
 import threading
-from Neat_evaluation import neat_evaluator as optimized_neat_evaluator
+from Neat_evaluation import neat_evaluator
 import Pulp_utils
 from NEAT_Reproduction import FullyConnectedToOutputReproduction
 from settings import (
@@ -72,18 +72,45 @@ def load_checkpoint_with_info(filename="checkpoint_full.pkl"):
     return checkpoint_data["population"], checkpoint_data["generation"], checkpoint_data["wcps"]
 
 # Plot update; import matplotlib locally so module import-time won't touch GUI
-def update_plot(iterations, ratios, ax, line, save_path: str | None = None, dpi: int = 150, transparent: bool = False):
+def update_plot(iterations, series_list, ax, lines, labels=None, save_path: str | None = None, dpi: int = 150, transparent: bool = False):
+    """
+    iterations : list[int]
+    series_list: list of lists, e.g. [winner_fitness_history, winner_wca_history, winner_vio_history]
+    ax         : matplotlib Axes
+    lines      : list of Line2D objects corresponding to series_list
+    labels     : optional list of labels for stats text order
+    """
     import matplotlib.pyplot as plt
 
-    if len(iterations) == 0 or len(ratios) == 0:
+    if len(iterations) == 0 or not any(len(s) for s in series_list):
         return
 
-    line.set_xdata(iterations)
-    line.set_ydata(ratios)
+    # ensure lines and series align
+    if len(series_list) != len(lines):
+        raise AssertionError("series_list and lines must be same length")
+
+    # update each line
+    for series, line in zip(series_list, lines):
+        line.set_xdata(iterations)
+        line.set_ydata(series)
+
     ax.relim()
     ax.autoscale_view()
-    max_ratio = max(ratios)
-    stats_text = f"Iterations: {len(iterations)}\nMax: {max_ratio:.6f}\nFinal: {ratios[-1]:.6f}"
+
+    # build stats text for each series
+    stats_lines = []
+    if labels is None:
+        labels = [f"Series {i}" for i in range(len(series_list))]
+
+    for label, series in zip(labels, series_list):
+        if len(series) > 0:
+            max_v = max(series)
+            final_v = series[-1]
+            stats_lines.append(f"{label}  Max: {max_v:.6f}  Final: {final_v:.6f}")
+        else:
+            stats_lines.append(f"{label}  (no data)")
+
+    stats_text = f"Iterations: {len(iterations)}\n" + "\n".join(stats_lines)
 
     # remove previous text objects safely
     for t in list(ax.texts):
@@ -112,9 +139,10 @@ def update_plot(iterations, ratios, ax, line, save_path: str | None = None, dpi:
         try:
             fig = ax.figure
             fig.savefig(save_path, dpi=dpi, bbox_inches="tight", transparent=transparent)
-            print(f"Saved fitness plot to: {save_path}")
+            print(f"Saved plot to: {save_path}")
         except Exception as e:
-            print(f"Warning: failed to save fitness plot to {save_path}: {e}")
+            print(f"Warning: failed to save plot to {save_path}: {e}")
+
 
 # Neat evaluator wrapper to use optimized evaluator
 
@@ -128,11 +156,15 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
     plt.ion()  # interactive mode ON
     fig, ax = plt.subplots(figsize=(12, 8))
     line, = ax.plot([], [], "b-", linewidth=2, label="Current Ratio")
+    line_wca, = ax.plot([], [], "g--", linewidth=1.5, label="Winner WCA")
+    line_vio, = ax.plot([], [], "r:", linewidth=1.5, label="Winner VIO")
     ax.set_xlabel("Iteration", fontsize=12)
-    ax.set_ylabel("Allocative Efficiency Ratio", fontsize=12)
+    ax.set_ylabel("Allocative Efficiency Ratio / WCA / VIO", fontsize=12)
     ax.set_title("Allocative Efficiency Progress", fontsize=14)
     ax.grid(True, alpha=0.3)
     ax.legend()
+
+    lines = [line, line_wca, line_vio]
 
     time_limit_seconds = time_limit_minutes * 60
 
@@ -141,17 +173,17 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
     else:
         pop = population
 
+    max_workers = min(os.cpu_count() or 1, 16)
+    evaluator = neat_evaluator(n, neat_config, max_workers=max_workers)
+    
     # Create NetVisualiser in main process only
-    try:
-        visualiser = NetVisualiser(neat_config)
-    except Exception:
-        visualiser = None
+    visualiser = NetVisualiser(neat_config)
 
     best_fitness = -float("inf")
     current_mutation = neat_config.genome_config.weight_mutate_power
 
     if wcp is None:
-        worst_case_profiles = victor_profiles + get_random_profiles(32, n)
+        worst_case_profiles = victor_profiles + get_random_profiles(256, n)
     else:
         worst_case_profiles = wcp
 
@@ -166,6 +198,7 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
 
         winner_fitness_history = []
         winner_wca_history = []
+        winner_vio_history = []
         iterations = []
 
         time_of_last_max_improvement = start_time
@@ -183,9 +216,22 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
 
             elapsed_time_check = time.time() - start_time
             if elapsed_time_check >= time_limit_seconds or keyboard_listener.stop_training:
-                update_plot(iterations, winner_fitness_history, ax, line, save_path=f"saves/p_{n}a_fit{winner.fitness:.6f}.png")
-                visualiser.save_png(f"saves/n_{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png", dpi=150, transparent=True)
-                save_array_to_csv(np.array(list(zip(winner_fitness_history, winner_wca_history))), f"saves/f_{n}a_fit{winner.fitness:.6f}.csv")
+                update_plot(
+                    iterations,
+                    [winner_fitness_history, winner_wca_history, winner_vio_history],
+                    ax,
+                    lines,
+                    labels=["Fitness", "WCA", "VIO"],
+                    save_path=f"saves/p_{n}a_fit{winner.fitness:.6f}.png",
+                )
+                try:
+                    visualiser.save_png(f"saves/n_{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png", dpi=150, transparent=True)
+                except Exception:
+                    pass
+                save_array_to_csv(
+                    np.array(list(zip(winner_fitness_history, winner_wca_history, winner_vio_history))),
+                    f"saves/f_{n}a_fit{winner.fitness:.6f}.csv",
+                )
                 save_checkpoint_with_info(pop, pop.generation, worst_case_profiles)
                 break
 
@@ -193,27 +239,24 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
             print("With", len(pop.species.species), "species and", len(pop.population), "individuals")
 
             # Run NEAT generation; neat_evaluator will call parallel evaluator from main process.
-            max_workers = min(os.cpu_count() or 1, 16)
-
-            winner = pop.run(
-                lambda genomes, config: optimized_neat_evaluator(
-                    genomes=genomes,
-                    config=config,
-                    worst_case_profiles=worst_case_profiles,  # same variable you already use
-                    alpha=alpha,
-                    alpha_delta=alpha_delta,
-                    n=n,
-                    max_workers=max_workers,
-                    batch_size=BATCH_SIZE,
-                    tol=1e-4,
-                ),
-                1,
+            winner = evaluator.run(
+                pop,
+                worst_case_profiles,
+                alpha,
+                alpha_delta,
+                epochs_per_generation,
             )
 
             training_duration = time.time() - iteration_start_time
 
             if iter_index > 1:
-                update_plot(iterations, winner_fitness_history, ax, line)
+                update_plot(
+                    iterations,
+                    [winner_fitness_history, winner_wca_history, winner_vio_history],
+                    ax,
+                    lines,
+                    labels=["Fitness", "WCA", "VIO"],
+                )
                 if visualiser is not None:
                     try:
                         visualiser.update(winner)
@@ -265,13 +308,17 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
             print(f"Current Left-Right error: {error_left:.5f} ~~~ {error_right:.5f}")
             print(f"Current total_error: {total_error:.10f}")
             print(f"Winner worst_alpha: {winner.wca:.10f}")
+            print(f"Winner vio: {winner.vio:.10f}")
             print(f"winner_fitness: {winner.fitness:.10f}")
 
             if visualiser is not None and saves_done < saves_per_run:
                 # elapsed_time_check is already computed as time.time() - start_time
                 if elapsed_time_check >= next_save_time:
                     save_checkpoint_with_info(pop, pop.generation, worst_case_profiles)
-                    visualiser.save_png(f"saves/n_{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png", dpi=150, transparent=True)
+                    try:
+                        visualiser.save_png(f"saves/n_{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png", dpi=150, transparent=True)
+                    except Exception:
+                        pass
                     saves_done += 1
                     last_save_iter = iter_index
                     next_save_time += interval
@@ -294,6 +341,7 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
 
             winner_fitness_history.append(winner.fitness)
             winner_wca_history.append(winner.wca)
+            winner_vio_history.append(winner.vio)
             iterations.append(iter_index)
 
             print(
@@ -323,9 +371,22 @@ def run_training(time_limit_minutes, epochs_per_generation, alpha_delta, populat
             target_ratio = target_ratios.get(n, None)
             if target_ratio is not None and abs(winner.fitness - target_ratio) < 0.0001 and alpha_delta == 0.0:
                 print(f"Allocative ratio is within tolerance of target {target_ratio:.6f}. Stopping training.")
-                update_plot(iterations, winner_fitness_history, ax, line, save_path=f"saves/p_{n}a_fit{winner.fitness:.6f}.png")
-                visualiser.save_png(f"saves/n_{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png", dpi=150, transparent=True)
-                save_array_to_csv(np.array(list(zip(winner_fitness_history, winner_wca_history))), f"saves/f_{n}a_fit{winner.fitness:.6f}.csv")
+                update_plot(
+                    iterations,
+                    [winner_fitness_history, winner_wca_history, winner_vio_history],
+                    ax,
+                    lines,
+                    labels=["Fitness", "WCA", "VIO"],
+                    save_path=f"saves/p_{n}a_fit{winner.fitness:.6f}.png",
+                )
+                try:
+                    visualiser.save_png(f"saves/n_{n}a_iter{iter_index}_t{int(elapsed_time_check)}s_fit{winner.fitness:.6f}.png", dpi=150, transparent=True)
+                except Exception:
+                    pass
+                save_array_to_csv(
+                    np.array(list(zip(winner_fitness_history, winner_wca_history, winner_vio_history))),
+                    f"saves/f_{n}a_fit{winner.fitness:.6f}.csv",
+                )
                 save_checkpoint_with_info(pop, pop.generation, worst_case_profiles)
                 break
 

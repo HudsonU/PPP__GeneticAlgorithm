@@ -1,26 +1,29 @@
-# neat_eval_optimized.py
+# neat_eval_parallel_rewrite.py
 from __future__ import annotations
 import os
-import itertools
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Iterable, List, Tuple, Any
+from typing import Iterable, Any, Tuple, List
 import numpy as np
+import neat
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import torch
+from torch import nn
 
 # --------------------------------------------------------------------
-# Worker-global variables (each process will get its own copy via initializer)
+# Module-level worker globals (populated in each worker by initializer)
 # --------------------------------------------------------------------
-_WORKER_PROFILES: List[List[float]] | None = None     # list of profiles (python lists)
+_WORKER_PROFILES: np.ndarray | None = None
 _WORKER_M: int = 0
 _WORKER_N: int = 0
-_WORKER_THETA_MINUS: List[List[List[float]]] | None = None  # [profile_idx][i] -> list length n-1
-_WORKER_S_THETA: List[float] | None = None
+_WORKER_THETA_MINUS_BY_I: np.ndarray | None = None
+_WORKER_S_THETA: np.ndarray | None = None
 _WORKER_TOL: float = 1e-4
 _WORKER_ALPHA: float = 0.0
 _WORKER_ALPHA_DELTA: float = 0.0
-_WORKER_CONFIG: Any = None   # neat config object for FeedForwardNetwork.create
+_WORKER_CONFIG: Any = None
+
 
 # --------------------------------------------------------------------
-# Initializer run once per worker process
+# Worker initializer: called once in each worker process
 # --------------------------------------------------------------------
 def _init_worker(
     worst_case_profiles: Iterable[Iterable[float]],
@@ -30,229 +33,250 @@ def _init_worker(
     alpha: float = 0.0,
     alpha_delta: float = 0.0,
 ) -> None:
+    """Initialize module-level globals inside each worker process.
+
+    This is passed as `initializer`/`initargs` to ProcessPoolExecutor so
+    workers avoid re-parsing the profiles for every genome.
     """
-    Run in each worker process once. Precompute:
-      - profiles as python lists
-      - s_theta (sum or 1.0 max)
-      - theta_minus_i lists for fast net.activate calls
-    This avoids repeated numpy conversion and concatenation per genome.
-    """
-    global _WORKER_PROFILES, _WORKER_M, _WORKER_N, _WORKER_THETA_MINUS, _WORKER_S_THETA
+    global _WORKER_PROFILES, _WORKER_M, _WORKER_N, _WORKER_THETA_MINUS_BY_I, _WORKER_S_THETA
     global _WORKER_TOL, _WORKER_ALPHA, _WORKER_ALPHA_DELTA, _WORKER_CONFIG
 
     _WORKER_CONFIG = config
-    _WORKER_TOL = tol
-    _WORKER_ALPHA = alpha
-    _WORKER_ALPHA_DELTA = alpha_delta
-    _WORKER_N = n
+    _WORKER_TOL = float(tol)
+    _WORKER_ALPHA = float(alpha)
+    _WORKER_ALPHA_DELTA = float(alpha_delta)
+    _WORKER_N = int(n)
 
-    # Convert to numpy once for validation, then to python lists for activate()
     arr = np.asarray(list(worst_case_profiles), dtype=float)
-    if arr.ndim == 1 and arr.shape[0] == 0:
-        raise ValueError("worst_case_profiles is empty")
-    if arr.size == 0:
-        raise ValueError("worst_case_profiles is empty")
+    if arr.ndim != 2 or arr.shape[1] != _WORKER_N:
+        raise ValueError(f"Profiles must be shape (M, N), got {arr.shape}")
 
-    m = arr.shape[0]
-    # Basic validation of shape: each profile must have length n
-    if arr.shape[1] != n:
-        # provide a clear message
-        raise ValueError(f"worst_case_profiles shape[1] = {arr.shape[1]} != expected n = {n}")
+    _WORKER_M = int(arr.shape[0])
+    _WORKER_PROFILES = arr
+    _WORKER_S_THETA = np.maximum(arr.sum(axis=1), 1.0)
 
-    _WORKER_M = m
-    # make python lists-of-lists (neat net.activate prefers sequences)
-    _WORKER_PROFILES = [row.tolist() for row in arr]
+    theta_minus_by_i = np.empty((_WORKER_N, _WORKER_M, _WORKER_N - 1), dtype=float)
+    for i in range(_WORKER_N):
+        mask = np.ones(_WORKER_N, bool)
+        mask[i] = False
+        theta_minus_by_i[i] = arr[:, mask]
+    _WORKER_THETA_MINUS_BY_I = theta_minus_by_i
 
-    # s_theta is max(sum(theta), 1.0) per profile
-    sums = np.sum(arr, axis=1)
-    _WORKER_S_THETA = np.maximum(sums, 1.0).tolist()
 
-    # Precompute theta_minus_i for every profile and every i as python lists
-    # Format: _WORKER_THETA_MINUS[profile_idx][i] -> list length n-1
-    _WORKER_THETA_MINUS = []
-    for theta_list in _WORKER_PROFILES:
-        row = []
-        # use list slicing (cheap in Python)
-        for i in range(n):
-            row.append(theta_list[:i] + theta_list[i + 1 :])
-        _WORKER_THETA_MINUS.append(row)
+class GenomeNetTorch(nn.Module):
+    def __init__(self, genome, config):
+        super().__init__()
+        self.config = config
+        # gather nodes and connections
+        try:
+            node_ids = list(genome.nodes.keys())
+        except Exception:
+            node_ids = list(genome.nodes)
+        self.node_ids = node_ids
+        self.incoming = {}
+        for (i, o), conn in genome.connections.items():
+            if not conn.enabled:
+                continue
+            self.incoming.setdefault(o, []).append((i, conn.weight))
+
+        num_inputs = config.genome_config.num_inputs
+        num_outputs = config.genome_config.num_outputs
+        self.input_ids = [i for i in range(-num_inputs, 0)]
+        self.output_ids = list(range(num_outputs))
+
+        self.topo_order = self._compute_topo_order()
+
+    def _compute_topo_order(self):
+        preds = {}
+        nodes = set(self.node_ids)
+        for (i, o), _ in getattr(self, 'incoming', {}).items():
+            preds.setdefault(o, set()).add(i)
+
+        ready = [n for n in nodes if (n not in preds) or all(p in self.input_ids for p in preds.get(n, []))]
+        order = []
+        visited = set()
+        while ready:
+            node = ready.pop(0)
+            if node in visited:
+                continue
+            order.append(node)
+            visited.add(node)
+            for (i, o), _ in getattr(self, 'incoming', {}).items():
+                if i == node:
+                    pred_set = preds.get(o, set())
+                    if all((p in visited) or (p in self.input_ids) for p in pred_set):
+                        ready.append(o)
+        for n in nodes:
+            if n not in visited:
+                order.append(n)
+        return order
+
+    def forward(self, x):
+        device = x.device
+        batch = x.shape[0]
+        node_vals = {}
+        for idx, nid in enumerate(self.input_ids):
+            node_vals[nid] = x[:, idx]
+        for node in self.topo_order:
+            if node in self.input_ids:
+                continue
+            incoming = self.incoming.get(node, [])
+            if not incoming:
+                node_vals[node] = torch.zeros(batch, device=device)
+                continue
+            s = torch.zeros(batch, device=device)
+            for i, w in incoming:
+                v = node_vals.get(i)
+                if v is None:
+                    continue
+                s = s + v * float(w)
+            node_vals[node] = torch.tanh(s)
+        outputs = [node_vals.get(o, torch.zeros(batch, device=device)) for o in self.output_ids]
+        if outputs:
+            return torch.stack(outputs, dim=1)
+        return torch.zeros(batch, 1, device=device)
 
 
 # --------------------------------------------------------------------
-# Core per-genome evaluator that uses worker globals (runs inside worker)
+# Genome evaluation function that runs inside a worker process
 # --------------------------------------------------------------------
-def _evaluate_single_genome_worker(pair: Tuple[int, Any]) -> Tuple[int, float, float, bool, float]:
-    """
-    Evaluate a single genome inside a worker process. This expects that
-    _init_worker has already run in this process to set up globals.
-    Returns: (genome_id, fitness, worst_alpha, infeasible_flag, max_violation)
-    """
-    global _WORKER_PROFILES, _WORKER_M, _WORKER_N, _WORKER_THETA_MINUS, _WORKER_S_THETA
-    global _WORKER_TOL, _WORKER_ALPHA, _WORKER_ALPHA_DELTA, _WORKER_CONFIG
+def _eval_genome_parallel(pair: Tuple[int, Any]) -> Tuple[int, float, float, bool, float]:
+    """Evaluate a single (gid, genome) pair using module-level worker globals.
 
+    Returns (gid, fitness, worst_alpha, infeasible_flag, max_violation)
+    """
     gid, genome = pair
 
-    # create network for genome using global config (unavoidable per-genome)
-    # neat.nn.FeedForwardNetwork.create(genome, config)
-    # Some neat wrappers store config on genome; use _WORKER_CONFIG for reliability
-    net = __import__("neat").nn.FeedForwardNetwork.create(genome, _WORKER_CONFIG)
-
-    infeasible = False
-    worst_alpha = _WORKER_ALPHA
-    max_violation = 0.0
-    alpha_use = _WORKER_ALPHA - _WORKER_ALPHA_DELTA
-
-    # Local copies for speed
-    M = _WORKER_M
     N = _WORKER_N
-    theta_minus = _WORKER_THETA_MINUS
-    s_theta_list = _WORKER_S_THETA
+    M = _WORKER_M
     tol = _WORKER_TOL
+    alpha_use = _WORKER_ALPHA - _WORKER_ALPHA_DELTA
+    s_theta = _WORKER_S_THETA
+    theta_minus_by_i = _WORKER_THETA_MINUS_BY_I
 
-    for idx in range(M):
-        # fast locals
-        s_theta = s_theta_list[idx]
-        theta_minus_for_profile = theta_minus[idx]
-
-        # Sum the network outputs S = sum_i net(theta_minus_i)
-        S = 0.0
-        # net.activate expects a sequence; precomputed lists avoid allocations
+    try:
+        net = GenomeNetTorch(genome, _WORKER_CONFIG)
+        dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        net.to(dev).eval()
+        stacked_inputs = torch.from_numpy(theta_minus_by_i.reshape(N * M, N - 1)).to(dev, dtype=torch.float32)
+        with torch.no_grad():
+            outputs = net(stacked_inputs).view(N, M, -1)
+        S = outputs.sum(dim=2).sum(dim=0).cpu().numpy()  # shape (M,)
+    except Exception:
+        # fallback to CPU neat if something goes wrong in torch path
+        net = neat.nn.FeedForwardNetwork.create(genome, _WORKER_CONFIG)
+        S = np.zeros(M)
         for i in range(N):
-            # cast to float in case net returns np.float32 etc
-            S += float(net.activate(theta_minus_for_profile[i])[0])
+            out_vals = [float(net.activate(inp.tolist())[0]) for inp in theta_minus_by_i[i]]
+            S += np.array(out_vals)
 
-        left_error = (N - 1) * s_theta - S
-        right_error = S - (N - (alpha_use)) * s_theta
-        total_error = (left_error if left_error > 0.0 else 0.0) + (right_error if right_error > 0.0 else 0.0)
+    left_error = (N - 1) * s_theta - S
+    left_error[left_error < 0.0] = 0.0
+    right_error = S - (N - (alpha_use)) * s_theta
+    right_error[right_error < 0.0] = 0.0
+    total_error = left_error + right_error
 
-        if total_error > max_violation:
-            max_violation = total_error
+    infeasible = bool((total_error > tol).any())
+    max_violation = float(total_error.max()) if total_error.size > 0 else 0.0
 
-        if total_error > tol:
-            infeasible = True
-            # continue to compute max_violation across profiles
-
-        achieved_alpha = N - S / s_theta
-        if achieved_alpha < worst_alpha:
-            worst_alpha = achieved_alpha
+    achieved_alpha = N - S / s_theta
+    worst_alpha_val = float(np.min(achieved_alpha)) if achieved_alpha.size > 0 else float(_WORKER_ALPHA)
+    worst_alpha = min(_WORKER_ALPHA, worst_alpha_val)
 
     fitness = worst_alpha - max_violation
-    return (gid, fitness, worst_alpha, infeasible, max_violation)
+    return (gid, float(fitness), float(worst_alpha), bool(infeasible), float(max_violation))
 
 
 # --------------------------------------------------------------------
-# Batch worker wrapper: evaluate a list of genomes in one call (reduces pickling)
+# Simple neat_evaluator class: create in main, call to evaluate a generation
 # --------------------------------------------------------------------
-def _evaluate_genome_batch_worker(batch: List[Tuple[int, Any]]) -> List[Tuple[int, float, float, bool, float]]:
-    """
-    Evaluate a batch of (gid, genome) pairs inside a worker process.
-    Returns a list of results.
-    """
-    results = []
-    for pair in batch:
-        results.append(_evaluate_single_genome_worker(pair))
-    return results
+class neat_evaluator:
+    """Simple evaluator object.
 
+    Usage:
+        evaluator = neat_evaluator(n, neat_config, max_workers=8)
+        # inside training loop:
+        winner = evaluator.run_one_generation(pop, worst_case_profiles, alpha, alpha_delta)
 
-# --------------------------------------------------------------------
-# Utility: chunk an iterable into fixed-size batches
-# --------------------------------------------------------------------
-def _chunked(iterable: Iterable, size: int):
-    it = iter(iterable)
-    while True:
-        chunk = list(itertools.islice(it, size))
-        if not chunk:
-            break
-        yield chunk
+    Methods:
+      - evaluate_genomes(genomes, config, worst_case_profiles, alpha, alpha_delta)
+        sets genome.fitness and attributes wca/vio for the provided genomes (no return)
 
-
-# --------------------------------------------------------------------
-# Public function to evaluate genomes in parallel (optimized)
-# --------------------------------------------------------------------
-def eval_genomes_in_parallel_optimized(
-    genome_pairs: Iterable[Tuple[int, Any]],
-    config: Any,
-    worst_case_profiles: Iterable[Iterable[float]],
-    alpha: float,
-    alpha_delta: float,
-    n: int,
-    max_workers: int | None = None,
-    batch_size: int = 8,
-    tol: float = 1e-4,
-) -> None:
-    """
-    Parallel evaluation using ProcessPoolExecutor with a per-worker initializer
-    and batching to reduce overhead.
-
-    - genome_pairs: iterable of (gid, genome) pairs
-    - config: neat config object (stored in worker globals)
-    - worst_case_profiles: iterable of profile iterables (must be length n)
-    - alpha, alpha_delta, n: same meaning as your original code
-    - max_workers: number of worker processes (default: min(os.cpu_count(), 16))
-    - batch_size: number of genomes per job submitted to worker (tune)
-    - tol: tolerance for infeasibility check
+      - run_one_generation(population, worst_case_profiles, alpha, alpha_delta)
+        runs `pop.run(...)` for a single generation and returns the winning genome.
     """
 
-    if max_workers is None:
-        max_workers = min(os.cpu_count() or 1, 16)
+    def __init__(self, n: int, config: Any, *, max_workers: int | None = None, tol: float = 1e-4):
+        self.n = int(n)
+        self.config = config
+        self.tol = float(tol)
+        self.max_workers = max_workers if max_workers is not None else max(1, (os.cpu_count() or 1))
 
-    # Convert genome_pairs to list because we'll need to map results back to genomes
-    genome_pairs_list = list(genome_pairs)
-    # mapping from id -> genome object (in parent process)
-    id_to_genome = {gid: g for (gid, g) in genome_pairs_list}
+    def evaluate_genomes(
+        self,
+        genomes: Iterable[Tuple[int, Any]],
+        config: Any,
+        worst_case_profiles: Iterable[Iterable[float]],
+        alpha: float,
+        alpha_delta: float,
+    ) -> None:
+        """Evaluate the provided genomes (an iterable of (gid, genome)) across the given profiles.
 
-    # Build batches (lists of (gid, genome))
-    batches = list(_chunked(genome_pairs_list, batch_size))
+        This uses a ProcessPoolExecutor with initializer to pre-load profiles in workers.
+        """
+        genome_pairs = list(genomes)
+        if not genome_pairs:
+            return
 
-    # Start executor with initializer to precompute constants inside each worker
-    with ProcessPoolExecutor(
-        max_workers=max_workers,
-        initializer=_init_worker,
-        initargs=(worst_case_profiles, n, config, tol, alpha, alpha_delta),
-    ) as exe:
-        # Submit batch tasks
-        futures = [exe.submit(_evaluate_genome_batch_worker, batch) for batch in batches]
+        # ensure args types
+        alpha_f = float(alpha)
+        alpha_delta_f = float(alpha_delta)
+        tol_f = float(self.tol)
+        max_workers = min(int(self.max_workers), len(genome_pairs))
 
-        # Collect results as they complete
-        for fut in as_completed(futures):
-            batch_results = fut.result()
-            for gid, fitness, worst_alpha, infeasible, max_violation in batch_results:
-                genome_obj = id_to_genome[gid]
-                # write back into genome objects in parent process
-                genome_obj.fitness = fitness
-                # store worst-case alpha (wca) attribute for downstream use
-                setattr(genome_obj, "wca", worst_alpha)
+        # Prepare executor with initializer so each worker precomputes arrays once.
+        results: List[Tuple[int, float, float, bool, float]] = []
+        with ProcessPoolExecutor(
+            max_workers=max_workers,
+            initializer=_init_worker,
+            initargs=(worst_case_profiles, self.n, self.config, tol_f, alpha_f, alpha_delta_f),
+        ) as exe:
+            futures = [exe.submit(_eval_genome_parallel, pair) for pair in genome_pairs]
+            for fut in as_completed(futures):
+                results.append(fut.result())
 
-    # function returns None; genomes updated in-place
-    return
+        # assign results back to genome objects
+        id_to_genome = {gid: g for gid, g in genome_pairs}
+        for gid, fitness, worst_alpha, infeasible, max_violation in results:
+            genome = id_to_genome[gid]
+            genome.fitness = float(fitness)
+            setattr(genome, "wca", float(worst_alpha))
+            setattr(genome, "vio", float(max_violation))
 
+    def run_one_generation(self, pop: "neat.Population", worst_case_profiles: Iterable[Iterable[float]], alpha: float, alpha_delta: float):
+        """Run a single generation with `pop.run(...)` using this evaluator and return the winner genome."""
+        # pop.run expects a function(genomes, config) -> None that sets genome.fitness
+        def _eval_wrapper(genomes, config):
+            self.evaluate_genomes(genomes, config, worst_case_profiles, alpha, alpha_delta)
 
-# --------------------------------------------------------------------
-# Compatibility wrapper: replicate previous neat_evaluator signature
-# --------------------------------------------------------------------
-def neat_evaluator(
-    genomes: Iterable[Tuple[int, Any]],
-    config: Any,
-    worst_case_profiles: Iterable[Iterable[float]],
-    alpha: float,
-    alpha_delta: float,
-    n: int,
-    *,
-    max_workers: int | None = None,
-    batch_size: int = 8,
-    tol: float = 1e-4,
-) -> None:
-    """
-    Top-level convenience wrapper; matches old API.
-    """
-    eval_genomes_in_parallel_optimized(
-        genome_pairs=list(genomes),
-        config=config,
-        worst_case_profiles=worst_case_profiles,
-        alpha=alpha,
-        alpha_delta=alpha_delta,
-        n=n,
-        max_workers=max_workers,
-        batch_size=batch_size,
-        tol=tol,
-    )
+        winner = pop.run(_eval_wrapper, 1)
+        return winner
+
+    def run(self, pop: "neat.Population", worst_case_profiles: Iterable[Iterable[float]], alpha: float, alpha_delta: float, generations: int = 1):
+        """Run multiple generations (>=1). Returns the winner of the last generation.
+
+        Example:
+            winner = evaluator.run(pop, profiles, alpha, alpha_delta, generations=5)
+        """
+        if generations < 1:
+            raise ValueError("generations must be >= 1")
+
+        def _eval_wrapper(genomes, config):
+            self.evaluate_genomes(genomes, config, worst_case_profiles, alpha, alpha_delta)
+
+        winner = pop.run(_eval_wrapper, generations)
+        return winner
+
+    # Backwards-compatible callable API (so lambda genomes, config: evaluator(genomes, config, ... ) still works)
+    def __call__(self, genomes: Iterable[Tuple[int, Any]], config: Any, worst_case_profiles: Iterable[Iterable[float]], alpha: float, alpha_delta: float):
+        return self.evaluate_genomes(genomes, config, worst_case_profiles, alpha, alpha_delta)
