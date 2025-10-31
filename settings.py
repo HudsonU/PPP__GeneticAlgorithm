@@ -5,7 +5,7 @@ from random import seed
 from datetime import datetime, timezone
 
 # number of agents
-n = 3
+n = 6
 
 # set time limit for each episode in hours
 time_limit = 12

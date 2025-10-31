@@ -25,12 +25,11 @@ from math import isfinite
 
 def compute_big_m(genome, config, input_bounds=(0.0, 1.0), scale=1.0, max_iters=int(1e4), debug=False):
     """
-    Robust interval propagation for NEAT genomes (ReLU). Improvements vs. naive:
-      - detect SCCs and apply damped updates to nodes in strongly-coupled components
-      - clamp extremely large widths to a safe range to avoid numerical explosion
-      - keep orphan nodes' pre-interval equal to bias (as before)
-    Parameters:
-      - debug: if True prints suspicious nodes / sccs
+    Interval propagation for NEAT genomes with ReLU activations.
+    - No SCC damping (user requested).
+    - Uses predecessor *post-activation* (ReLU) intervals when computing contributions,
+      while node_bounds stores pre-activation intervals (as used downstream in the MIP).
+    - Iterates until convergence or max_iters, then clamps extremely large intervals.
     """
     input_keys = list(getattr(config.genome_config, "input_keys", []))
     output_keys = list(getattr(config.genome_config, "output_keys", []))
@@ -48,6 +47,7 @@ def compute_big_m(genome, config, input_bounds=(0.0, 1.0), scale=1.0, max_iters=
         if k in input_keys:
             node_bounds[k] = (float(input_bounds[0]), float(input_bounds[1]))
         else:
+            # conservative initial pre-activation interval
             node_bounds[k] = (-10.0, 10.0)
 
     # Precompute incoming enabled connections
@@ -59,108 +59,55 @@ def compute_big_m(genome, config, input_bounds=(0.0, 1.0), scale=1.0, max_iters=
             incoming_map[out_n].append((in_n, conn))
             enabled_edges.append((in_n, out_n, float(conn.weight)))
 
-    # Build adjacency for SCC detection (only internal nodes and enabled edges)
-    # We'll do a small Tarjan implementation to get SCCs.
-    nodes_for_graph = [n for n in all_nodes if n not in input_keys]
-    idx_map = {n:i for i,n in enumerate(nodes_for_graph)}
-    graph = {n: [] for n in nodes_for_graph}
-    for (in_n, out_n, w) in enabled_edges:
-        if out_n in graph and in_n in graph:
-            graph[in_n].append(out_n)
-
-    # Tarjan to compute SCCs
-    index = 0
-    stack = []
-    onstack = set()
-    indices = {}
-    lowlink = {}
-    sccs = []
-
-    def strongconnect(v):
-        nonlocal index
-        indices[v] = index
-        lowlink[v] = index
-        index += 1
-        stack.append(v)
-        onstack.add(v)
-        for w in graph.get(v, ()):
-            if w not in indices:
-                strongconnect(w)
-                lowlink[v] = min(lowlink[v], lowlink[w])
-            elif w in onstack:
-                lowlink[v] = min(lowlink[v], indices[w])
-        if lowlink[v] == indices[v]:
-            # root of SCC
-            comp = []
-            while True:
-                w = stack.pop()
-                onstack.remove(w)
-                comp.append(w)
-                if w == v:
-                    break
-            sccs.append(comp)
-
-    for v in nodes_for_graph:
-        if v not in indices:
-            strongconnect(v)
-
-    # map node -> scc_id
-    node_to_scc = {}
-    for sid, comp in enumerate(sccs):
-        for n in comp:
-            node_to_scc[n] = sid
-
-    # choose damping factor per SCC: larger SCCs (or self-loop) -> stronger damping
-    scc_damping = {}
-    for sid, comp in enumerate(sccs):
-        size = len(comp)
-        if size == 1:
-            # check self-loop
-            n = comp[0]
-            has_self = any((in_n == n and out_n == n and conn.enabled) for (in_n, out_n), conn in genome.connections.items())
-            scc_damping[sid] = 0.9 if has_self else 1.0  # near 1 = no damping for simple nodes
-        else:
-            # larger SCC -> damp more
-            scc_damping[sid] = 0.6  # update = old*beta + new*(1-beta) with beta ~0.6
-
-    # iterative relax / propagation with damping inside SCCs
+    # Iterative interval propagation (no damping)
     for it in range(int(max_iters)):
         changed = False
-        # compute tentative updates in temp dict so damping uses old values
         updates = {}
+
         for node in all_nodes:
             if node in input_keys:
                 continue
             node_gene = genome.nodes.get(node)
             bias = float(getattr(node_gene, "bias", 0.0))
             incoming = incoming_map.get(node, [])
+
+            # If no incoming connections, pre == bias
             if not incoming:
-                lb, ub = bias, bias
-            else:
-                lb = bias
-                ub = bias
-                for in_n, conn in incoming:
-                    w = float(conn.weight)
-                    in_lb, in_ub = node_bounds.get(in_n, (float(input_bounds[0]), float(input_bounds[1])))
-                    if w >= 0:
-                        lb += w * in_lb
-                        ub += w * in_ub
-                    else:
-                        lb += w * in_ub
-                        ub += w * in_lb
+                new_lb, new_ub = bias, bias
+                updates[node] = (new_lb, new_ub)
+                continue
+
+            # Compute using predecessor *post-activation* (ReLU) intervals
+            lb = bias
+            ub = bias
+            for in_n, conn in incoming:
+                w = float(conn.weight)
+                # inputs: use input_bounds directly (these are the g_j bounds)
+                if in_n in input_keys:
+                    in_pre_lb, in_pre_ub = float(input_bounds[0]), float(input_bounds[1])
+                    in_out_lb = max(0.0, in_pre_lb)  # input bounds expected >=0 for this problem, but safe
+                    in_out_ub = max(0.0, in_pre_ub)
+                else:
+                    # predecessor pre-activation bounds (stored in node_bounds)
+                    pred_pre_lb, pred_pre_ub = node_bounds.get(in_n, (-10.0, 10.0))
+                    # convert pre -> post via ReLU
+                    in_out_lb = max(0.0, pred_pre_lb)
+                    in_out_ub = max(0.0, pred_pre_ub)
+
+                # combine with sign awareness
+                if w >= 0.0:
+                    lb += w * in_out_lb
+                    ub += w * in_out_ub
+                else:
+                    lb += w * in_out_ub
+                    ub += w * in_out_lb
+
             new_lb, new_ub = min(lb, ub), max(lb, ub)
             updates[node] = (new_lb, new_ub)
 
-        # apply updates with damping for SCC nodes
+        # apply updates (no damping)
         for node, (new_lb, new_ub) in updates.items():
             prev_lb, prev_ub = node_bounds[node]
-            # if node belongs to an SCC that we damp, apply convex combination
-            if node in node_to_scc:
-                beta = scc_damping.get(node_to_scc[node], 1.0)
-                # combine: result = beta * old + (1-beta) * new
-                mixed_lb = beta * prev_lb + (1.0 - beta) * new_lb
-                mixed_ub = beta * prev_ub + (1.0 - beta) * new_ub
-                new_lb, new_ub = mixed_lb, mixed_ub
             # guard ordering
             if new_lb > new_ub:
                 new_lb, new_ub = new_ub, new_lb
@@ -170,9 +117,7 @@ def compute_big_m(genome, config, input_bounds=(0.0, 1.0), scale=1.0, max_iters=
                 changed = True
 
         if not changed:
-            continue
-            #break
-            
+            break
 
     # --- AFTER propagation: orphan detection & final normalization ---
     orphan_nodes = set()
@@ -184,7 +129,6 @@ def compute_big_m(genome, config, input_bounds=(0.0, 1.0), scale=1.0, max_iters=
             orphan_nodes.add(n)
 
     # final normalization & clamping for safety
-    # define a numeric clamp to keep values reasonable for the LP
     MAX_ABS_BOUND = 1e6  # clamp magnitude to 1e6 (tunable)
     MAX_WIDTH = 1e6
     for k, (lb, ub) in list(node_bounds.items()):
@@ -199,26 +143,22 @@ def compute_big_m(genome, config, input_bounds=(0.0, 1.0), scale=1.0, max_iters=
         # clamp extremely wide ranges
         if ub - lb > MAX_WIDTH:
             mid = 0.5 * (ub + lb)
-            lb = max(mid - MAX_WIDTH/2, -MAX_ABS_BOUND)
-            ub = min(mid + MAX_WIDTH/2,  MAX_ABS_BOUND)
+            lb = max(mid - MAX_WIDTH / 2, -MAX_ABS_BOUND)
+            ub = min(mid + MAX_WIDTH / 2, MAX_ABS_BOUND)
         lb = max(lb, -MAX_ABS_BOUND)
-        ub = min(ub,  MAX_ABS_BOUND)
+        ub = min(ub, MAX_ABS_BOUND)
         node_bounds[k] = (float(lb), float(ub))
 
-    # optional debug: print SCCs that are larger than 1 or self-looped and their nodes/bounds
+    # optional debug: print nodes with suspicious bounds
     if debug:
-        for sid, comp in enumerate(sccs):
-            if len(comp) > 1:
-                print(f"[DEBUG] SCC {sid} size {len(comp)} damping {scc_damping.get(sid)} nodes={comp}")
-                for n in comp:
-                    print(f"       bound {n}: {node_bounds.get(n)}")
-            else:
-                n = comp[0]
-                # check self-loop
-                if any((in_n == n and out_n == n and conn.enabled) for (in_n, out_n), conn in genome.connections.items()):
-                    print(f"[DEBUG] self-loop node {n} bound {node_bounds.get(n)}")
+        print("compute_big_m: final node bounds:")
+        for k, (L, U) in node_bounds.items():
+            print(f"  node {k}: ({L:.6g}, {U:.6g})")
+        if orphan_nodes:
+            print("Orphan nodes:", orphan_nodes)
 
     return node_bounds
+
 
 def get_worst_case_profile_via_mip_neat(
     genome,

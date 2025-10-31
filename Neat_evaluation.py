@@ -177,13 +177,15 @@ def _eval_genome_parallel(pair: Tuple[int, Any]) -> Tuple[int, float, float, boo
     total_error = left_error + right_error
 
     infeasible = bool((total_error > tol).any())
-    max_violation = float(total_error.max()) if total_error.size > 0 else 0.0
+    max_violation = float(total_error.max())
 
     achieved_alpha = N - S / s_theta
-    worst_alpha_val = float(np.min(achieved_alpha)) if achieved_alpha.size > 0 else float(_WORKER_ALPHA)
-    worst_alpha = min(_WORKER_ALPHA, worst_alpha_val)
+    worst_alpha_val = float(np.min(achieved_alpha))
+    worst_alpha = worst_alpha_val
 
-    fitness = worst_alpha - max_violation
+    f_alpha = min(alpha_use, worst_alpha)
+    f_vio = max(0,max_violation)
+    fitness =  f_alpha - f_vio
     return (gid, float(fitness), float(worst_alpha), bool(infeasible), float(max_violation))
 
 
