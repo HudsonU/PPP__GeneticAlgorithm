@@ -50,7 +50,7 @@ experiments/
 # Data files (if you have any datasets)
 data/
 datasets/
-*.csv
+#*.csv
 *.json
 *.h5
 *.hdf5
