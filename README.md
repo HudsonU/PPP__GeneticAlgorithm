@@ -1,12 +1,14 @@
-# Things to Do
+How to Run
 
-generally understand the code
+This project runs on Windows with Python 3.13.
 
-make code run from python not .sh
+Configuration:
+settings.py – general project settings
+neat_config.ini – NEAT algorithm configuration
 
-remove hard coded variables to the settings file
-    specifically the hyperparameters
+Note: num_inputs in neat_config.ini must equal n - 1 from settings.py.
 
-connect the GA into the main
+Execution:
+Once your settings are ready, run:
 
-configure the MIP through the settings file
+python main.py
